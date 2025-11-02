@@ -6,21 +6,21 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# Styling
+# --- Styling ---
 st.markdown(
     """
     <style>
       body {background-color: #0f1117; color: #e8e8e8;}
-      .stMetric {background: #1c1f2b; border-radius:12px; padding:10px;}
-      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
-      .block-container {padding-top:2rem;}
+      .stMetric {background: #1c1f2b; border-radius: 12px; padding: 10px;}
+      div[data-testid="stDataFrame"] table {border-radius: 10px; overflow: hidden;}
+      .block-container {padding-top: 2rem;}
     </style>
     """,
     unsafe_allow_html=True
 )
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a web-server log file (Combined Log Format) to detect bots, LLM bots, and Others (non-matched).")
+st.caption("Upload a web server log file to detect bots, LLM bots, and Others (non-matched).")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
@@ -66,22 +66,26 @@ if uploaded_file is not None:
 
         m = log_pattern.match(line)
         if not m:
-            # cannot parse correctly, treat as Others
             others_requests += 1
             continue
 
         ua = m.group("agent").strip()
 
+        # Extract simplified bot name
+        bot_name_match = re.search(r'\b([A-Za-z0-9\-\_]+Bot)\b', ua, flags=re.IGNORECASE)
+        if bot_name_match:
+            bot_name = bot_name_match.group(1)
+        else:
+            bot_name = ua  # fallback when no bot name found
+
         if bot_regex.search(ua):
-            # It's a bot
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
                 llm_bot_requests += 1
-                llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
+                llm_bot_uas[bot_name] = llm_bot_uas.get(bot_name, 0) + 1
             else:
                 generic_bot_requests += 1
-                generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
+                generic_bot_uas[bot_name] = generic_bot_uas.get(bot_name, 0) + 1
         else:
-            # Others (non-matched)
             others_requests += 1
 
         if total_requests % 200000 == 0:
@@ -95,8 +99,7 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
-    # Validate sum correctness: generic + llm + others should equal total
-    # Breakdown chart
+    # Composition chart
     st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
@@ -112,13 +115,13 @@ if uploaded_file is not None:
     st.plotly_chart(fig, use_container_width=True)
 
     # Data tables
-    st.subheader("🤖 All Generic Bot User-Agents")
-    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
+    st.subheader("🤖 All Generic Bot Names")
+    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["Bot Name","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_generic, use_container_width=True)
 
-    st.subheader("🧩 All LLM/AI Bot User-Agents")
-    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
+    st.subheader("🧩 All LLM/AI Bot Names")
+    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["Bot Name","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
@@ -126,8 +129,8 @@ if uploaded_file is not None:
     st.subheader("📥 Export Results")
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
-    st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
+    st.download_button("Download Generic Bot Names CSV", csv_generic, "generic_bot_names.csv", "text/csv", key="download-generic")
+    st.download_button("Download LLM Bot Names CSV", csv_llm, "llm_bot_names.csv", "text/csv", key="download-llm")
 
     st.success("✅ Analysis complete.")
 else:
