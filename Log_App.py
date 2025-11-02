@@ -20,7 +20,7 @@ st.markdown(
 )
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a web server log file to detect bots, LLM bots, and Others (non-matched).")
+st.caption("Upload a web server log file to detect bots (generic & LLM) and Others (non-matched).")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
@@ -52,10 +52,10 @@ if uploaded_file is not None:
     # Improved log line parsing pattern
     log_pattern = re.compile(
         r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
-        r'\"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+\" '
+        r'"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+" '
         r'(?P<status>\d{3}) \S+ '
-        r'\"(?P<referer>[^\"]*)\" '
-        r'\"(?P<agent>[^\"]*)\"'
+        r'"(?P<referer>[^"]*)" '
+        r'"(?P<agent>[^"]*)"'
     )
 
     for line in text_stream:
@@ -72,11 +72,11 @@ if uploaded_file is not None:
         ua = m.group("agent").strip()
 
         # Extract simplified bot name
-        bot_name_match = re.search(r'\b([A-Za-z0-9\-\_]+Bot)\b', ua, flags=re.IGNORECASE)
+        bot_name_match = re.search(r'\b([A-Za-z0-9\-_]+(?:Bot|User))\b', ua, flags=re.IGNORECASE)
         if bot_name_match:
             bot_name = bot_name_match.group(1)
         else:
-            bot_name = ua  # fallback when no bot name found
+            bot_name = ua  # fallback when no bot name matched
 
         if bot_regex.search(ua):
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
@@ -91,7 +91,7 @@ if uploaded_file is not None:
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests} lines…")
 
-    # Metrics
+    # Metrics display
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total_requests:,}")
