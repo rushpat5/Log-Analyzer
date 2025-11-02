@@ -5,7 +5,9 @@ import re
 
 st.title("Log File Bot-Analyzer")
 
-uploaded_file = st.file_uploader("Upload your log file (text format)", type=["log","txt","gz","bz2"])
+uploaded_file = st.file_uploader(
+    "Upload your log file (text format)", type=["log","txt","gz","bz2"]
+)
 if uploaded_file is not None:
     st.write("Processing file … this may take a while for large files")
     buffer = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
@@ -38,7 +40,10 @@ if uploaded_file is not None:
         r'YouBot',
         r'MistralAI-User'
     ]
-    bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
+    bot_regex = re.compile(
+        "|".join(generic_bot_patterns + ai_llm_bot_patterns),
+        flags=re.IGNORECASE
+    )
 
     total_requests = 0
     bot_requests = 0
@@ -69,9 +74,15 @@ if uploaded_file is not None:
     st.write("Human/Non-bot requests:", human_requests)
 
     st.write("Top generic bot user-agents:")
-    df_bots = pd.DataFrame(list(bot_useragents.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_bots = pd.DataFrame(
+        list(bot_useragents.items()),
+        columns=["User-Agent","Count"]
+    ).sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_bots.head(20))
 
     st.write("Top LLM/AI bot user-agents:")
-    df_llm = pd.DataFrame(list(llm_bot_useragents.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_llm = pd.DataFrame(
+        list(llm_bot_useragents.items()),
+        columns=["User-Agent","Count"]
+    ).sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm.head(20))
