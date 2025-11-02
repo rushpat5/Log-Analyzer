@@ -11,9 +11,9 @@ st.markdown(
     """
     <style>
       body {background-color: #0f1117; color: #e8e8e8;}
-      .stMetric {background: #1c1f2b; border-radius: 12px; padding: 10px;}
-      div[data-testid="stDataFrame"] table {border-radius: 10px; overflow: hidden;}
-      .block-container {padding-top: 2rem;}
+      .stMetric {background: #1c1f2b; border-radius:12px; padding:10px;}
+      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
+      .block-container {padding-top:2rem;}
     </style>
     """,
     unsafe_allow_html=True
@@ -24,7 +24,6 @@ st.caption("Upload a web server log file to detect bots (generic & LLM) and Othe
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
-# Bot pattern definitions
 generic_bot_patterns = [
     r'Googlebot', r'Bingbot', r'AhrefsBot', r'SemrushBot', r'YandexBot',
     r'DuckDuckBot', r'crawler', r'spider'
@@ -38,7 +37,7 @@ ai_llm_bot_patterns = [
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
 if uploaded_file is not None:
-    st.info("⏳ Processing file — large files may take some time…")
+    st.info("⏳ Processing file — please wait…")
     text_stream = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
 
     total_requests = 0
@@ -48,6 +47,7 @@ if uploaded_file is not None:
 
     generic_bot_uas = {}
     llm_bot_uas = {}
+    others_uas = {}
 
     log_pattern = re.compile(
         r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
@@ -65,6 +65,7 @@ if uploaded_file is not None:
 
         m = log_pattern.match(line)
         if not m:
+            # cannot parse -> count as Others
             others_requests += 1
             continue
 
@@ -79,6 +80,7 @@ if uploaded_file is not None:
                 generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
         else:
             others_requests += 1
+            others_uas[ua] = others_uas.get(ua, 0) + 1
 
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests} lines…")
@@ -114,11 +116,18 @@ if uploaded_file is not None:
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
+    st.subheader("🌀 All Others (non-matched) User-Agents")
+    df_others = pd.DataFrame(list(others_uas.items()), columns=["User-Agent","Count"]) \
+        .sort_values(by="Count", ascending=False).reset_index(drop=True)
+    st.dataframe(df_others, use_container_width=True)
+
     st.subheader("📥 Export Results")
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
+    csv_others = df_others.to_csv(index=False).encode('utf-8')
     st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
     st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
+    st.download_button("Download Others User-Agents CSV", csv_others, "others_user_agents.csv", "text/csv", key="download-others")
 
     st.success("✅ Analysis complete.")
 else:
