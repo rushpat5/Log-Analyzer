@@ -6,29 +6,26 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# ------------------- Styling -------------------
+# --- Styling ---
 st.markdown(
     """
     <style>
-    .main {background-color: #0f1117; color: #e8e8e8;}
-    h1, h2, h3, h4 {color: #f5f5f5;}
-    .stMetric {background: #1c1f2b; border-radius: 12px; padding: 10px;}
-    .block-container {padding-top: 2rem;}
-    div[data-testid="stDataFrame"] div[data-testid="StyledTable"] {
-        border-radius: 10px;
-    }
+      body {background-color: #0f1117; color: #e8e8e8;}
+      .stMetric {background: #1c1f2b; border-radius: 12px; padding: 10px;}
+      div[data-testid="stDataFrame"] table {border-radius: 10px; overflow: hidden;}
+      .block-container {padding-top: 2rem;}
     </style>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
 )
 
-# ------------------- Header -------------------
+# --- Header ---
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a webserver log file to analyze traffic, detect crawlers, and identify AI/LLM bots.")
+st.caption("Upload a web-server log file to analyze traffic, detect crawlers, AI/LLM bots, and ‘Others’ category.")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
-# ------------------- Bot definitions -------------------
+# Bot pattern definitions
 generic_bot_patterns = [
     r'Googlebot', r'Bingbot', r'AhrefsBot', r'SemrushBot', r'YandexBot',
     r'DuckDuckBot', r'crawler', r'spider'
@@ -41,64 +38,72 @@ ai_llm_bot_patterns = [
 ]
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
-# ------------------- Processing -------------------
 if uploaded_file is not None:
-    st.info("⏳ Processing file — this may take a while for large files...")
+    st.info("⏳ Processing file — large files may take some time…")
     buffer = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
 
-    total, bot_total, llm_total = 0, 0, 0
-    bot_uas, llm_uas = {}, {}
+    # Counters & collections
+    total_requests = 0
+    bot_requests = 0
+    llm_requests = 0
+    generic_bot_uas = {}
+    llm_bot_uas = {}
+    others_count = 0
 
     for line in buffer:
-        total += 1
+        total_requests += 1
         parts = line.split('"')
         if len(parts) < 6:
             continue
         ua = parts[-2]
         if bot_regex.search(ua):
-            bot_total += 1
+            bot_requests += 1
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
-                llm_total += 1
-                llm_uas[ua] = llm_uas.get(ua, 0) + 1
+                llm_requests += 1
+                llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
             else:
-                bot_uas[ua] = bot_uas.get(ua, 0) + 1
-        if total % 200000 == 0:
-            st.write(f"Processed {total} lines...")
+                generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
+        else:
+            others_count += 1
+        if total_requests % 200000 == 0:
+            st.write(f"Processed {total_requests} lines…")
 
-    human_total = total - bot_total
-
-    # ------------------- KPIs -------------------
+    # Metrics
+    st.subheader("📌 Key Metrics")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Requests", f"{total:,}")
-    col2.metric("Bot Requests", f"{bot_total:,}")
-    col3.metric("AI/LLM Bot Requests", f"{llm_total:,}")
-    col4.metric("Human Requests", f"{human_total:,}")
+    col1.metric("Total Requests", f"{total_requests:,}")
+    col2.metric("Bot Requests", f"{bot_requests:,}")
+    col3.metric("LLM/AI Bot Requests", f"{llm_requests:,}")
+    col4.metric("Others (non-matched)", f"{others_count:,}")
 
-    # ------------------- Pie chart -------------------
-    st.subheader("📊 Bot Traffic Breakdown")
-    data = {
-        "Category": ["Humans", "Generic Bots", "LLM/AI Bots"],
-        "Requests": [human_total, bot_total - llm_total, llm_total],
-    }
-    df_pie = pd.DataFrame(data)
-    fig_pie = px.pie(df_pie, names="Category", values="Requests", color="Category",
-                     color_discrete_sequence=["#2ecc71", "#3498db", "#9b59b6"],
-                     title="Overall Traffic Composition")
-    st.plotly_chart(fig_pie, use_container_width=True)
+    # Breakdown chart
+    st.subheader("📊 Traffic Composition")
+    df_comp = pd.DataFrame({
+        "Category": ["Bots (Generic)", "LLM/AI Bots", "Others"],
+        "Count": [bot_requests - llm_requests, llm_requests, others_count]
+    })
+    fig = px.pie(df_comp, names="Category", values="Count",
+                 color_discrete_sequence=["#3498db", "#9b59b6", "#2ecc71"],
+                 title="Requests by Category")
+    st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------- Data tables -------------------
+    # Display all bots data
     st.subheader("🤖 All Generic Bot User-Agents")
-    df_bots = pd.DataFrame(list(bot_uas.items()), columns=["User-Agent", "Count"]).sort_values(
-        by="Count", ascending=False
-    ).reset_index(drop=True)
-    st.dataframe(df_bots, use_container_width=True)
+    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent", "Count"]).sort_values(by="Count", ascending=False)
+    st.dataframe(df_generic, use_container_width=True)
 
-    st.subheader("🧩 All AI / LLM Bot User-Agents")
-    df_llm = pd.DataFrame(list(llm_uas.items()), columns=["User-Agent", "Count"]).sort_values(
-        by="Count", ascending=False
-    ).reset_index(drop=True)
+    st.subheader("🧩 All LLM/AI Bot User-Agents")
+    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent", "Count"]).sort_values(by="Count", ascending=False)
     st.dataframe(df_llm, use_container_width=True)
 
-    st.success("✅ Processing complete.")
+    # Download data option
+    st.subheader("📥 Export Results")
+    csv_generic = df_generic.to_csv(index=False).encode('utf-8')
+    csv_llm = df_llm.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
+    st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
+
+    st.success("✅ Analysis complete.")
+
 else:
-    st.warning("Please upload a log file to begin analysis.")
+    st.warning("Please upload a log file to start analysis.")
