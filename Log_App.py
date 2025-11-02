@@ -8,20 +8,38 @@ import plotly.express as px
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
 # --- Styling ---
-st.markdown(
-    """
-    <style>
-      body {background-color: #0f1117; color: #c9d1d9;}
-      .stMetric {background: #161b22; border-radius:12px; padding:12px; box-shadow:0px 3px 6px rgba(0,0,0,0.3);}
-      h1, h2, h3, h4 {color:#f0f6fc;}
-      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<style>
+  html, body, [class*="css"] {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #0d1117;
+    color: #c9d1d9;
+  }
+  .stMetric {
+    background: #161b22;
+    border-radius: 12px;
+    padding: 12px;
+    box-shadow: 0px 3px 6px rgba(0,0,0,0.3);
+    color: #c9d1d9;
+  }
+  h1,h2,h3,h4 {
+    color: #f0f6fc;
+  }
+  div[data-testid="stDataFrame"] table {
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .filter-box {
+    background: #161b22;
+    padding: 8px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+  }
+</style>
+""", unsafe_allow_html=True)
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload your web-server log (combined format) to detect bots (generic & LLM) and Others (non-matched).")
+st.caption("Upload your web-server log file to analyze bot traffic, LLM bots, and Others.")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
@@ -38,7 +56,7 @@ ai_llm_bot_patterns = [
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
 if uploaded_file is not None:
-    st.info("⏳ Processing file — please wait…")
+    st.info("⏳ Processing file — large files may take some time…")
     text_stream = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
 
     total_requests = 0
@@ -71,6 +89,7 @@ if uploaded_file is not None:
             continue
 
         ua = m.group("agent").strip()
+
         try:
             dt = datetime.datetime.strptime(m.group("time"), "%d/%b/%Y:%H:%M:%S %z")
         except Exception:
@@ -109,7 +128,7 @@ if uploaded_file is not None:
     })
     fig_pie = px.pie(
         df_comp, names="Category", values="Count",
-        color_discrete_sequence=["#1f78b4","#6a3d9a","#33a02c"],
+        color_discrete_sequence=["#1f78b4", "#6a3d9a", "#33a02c"],
         title="Request Composition by Category"
     )
     st.plotly_chart(fig_pie, use_container_width=True)
@@ -120,17 +139,16 @@ if uploaded_file is not None:
         df_ts["minute"] = df_ts["timestamp"].dt.floor("T")
         df_counts = df_ts.groupby(["minute","category"]).size().reset_index(name="count")
 
-        min_time = df_counts["minute"].min()
-        max_time = df_counts["minute"].max()
+        min_time = df_counts["minute"].min().to_pydatetime()
+        max_time = df_counts["minute"].max().to_pydatetime()
 
-        # slider supports datetime directly as min_value and max_value
         time_range = st.slider(
             "Select Time Window",
             min_value=min_time,
             max_value=max_time,
             value=(min_time, max_time),
             step=datetime.timedelta(minutes=1),
-            format="MM/DD/Y HH:mm"
+            format="MM/DD HH:mm"
         )
 
         filtered = df_counts[(df_counts["minute"] >= time_range[0]) & (df_counts["minute"] <= time_range[1])]
