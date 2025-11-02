@@ -7,44 +7,24 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# --- Embedded CSS for styling ---
-st.markdown("""
-<style>
-  /* Global */
-  html, body, [class*="css"] {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: #0d1117;
-    color: #c9d1d9;
-  }
-  .stMetric {
-    background: #161b22;
-    border-radius: 12px;
-    padding: 12px;
-    box-shadow: 0px 3px 6px rgba(0,0,0,0.3);
-    color: #c9d1d9;
-  }
-  h1, h2, h3, h4 {
-    color: #f0f6fc;
-  }
-  div[data-testid="stDataFrame"] table {
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  .filter-box {
-    background: #161b22;
-    padding: 8px;
-    border-radius: 8px;
-    margin-bottom: 12px;
-  }
-</style>
-""", unsafe_allow_html=True)
+# --- Styling ---
+st.markdown(
+    """
+    <style>
+      body {background-color: #0f1117; color: #c9d1d9;}
+      .stMetric {background: #161b22; border-radius:12px; padding:12px; box-shadow:0px 3px 6px rgba(0,0,0,0.3);}
+      h1, h2, h3, h4 {color:#f0f6fc;}
+      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload your web-server log (combined format) to analyze traffic categories, bots, and time-trends.")
+st.caption("Upload your web-server log (combined format) to detect bots (generic & LLM) and Others (non-matched).")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
-# Define bot patterns
 generic_bot_patterns = [
     r'Googlebot', r'Bingbot', r'AhrefsBot', r'SemrushBot', r'YandexBot',
     r'DuckDuckBot', r'crawler', r'spider'
@@ -69,7 +49,6 @@ if uploaded_file is not None:
     generic_bot_uas = {}
     llm_bot_uas = {}
 
-    # Time-series data collect
     ts_records = []
 
     log_pattern = re.compile(
@@ -92,14 +71,11 @@ if uploaded_file is not None:
             continue
 
         ua = m.group("agent").strip()
-
-        # Convert timestamp
         try:
             dt = datetime.datetime.strptime(m.group("time"), "%d/%b/%Y:%H:%M:%S %z")
-        except:
+        except Exception:
             dt = None
 
-        # Determine category
         if bot_regex.search(ua):
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
                 llm_bot_requests += 1
@@ -113,14 +89,12 @@ if uploaded_file is not None:
             others_requests += 1
             cat = "Others"
 
-        # record for time-series
         if dt is not None:
             ts_records.append({"timestamp": dt, "category": cat})
 
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests} lines…")
 
-    # KPI cards
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total_requests:,}")
@@ -128,31 +102,36 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
-    # Composition chart
     st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
-        "Category": ["Generic Bots","LLM/AI Bots","Others"],
+        "Category": ["Generic Bots", "LLM/AI Bots", "Others"],
         "Count": [generic_bot_requests, llm_bot_requests, others_requests]
     })
     fig_pie = px.pie(
-        df_comp,
-        names="Category",
-        values="Count",
+        df_comp, names="Category", values="Count",
         color_discrete_sequence=["#1f78b4","#6a3d9a","#33a02c"],
         title="Request Composition by Category"
     )
     st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Time-series chart
     if ts_records:
-        st.subheader("📈 Requests Over Time")
+        st.subheader("📈 Requests Timeline")
         df_ts = pd.DataFrame(ts_records)
         df_ts["minute"] = df_ts["timestamp"].dt.floor("T")
         df_counts = df_ts.groupby(["minute","category"]).size().reset_index(name="count")
 
         min_time = df_counts["minute"].min()
         max_time = df_counts["minute"].max()
-        time_range = st.slider("Select Time Window", value=(min_time, max_time), min_value=min_time, max_value=max_time, format="MM/dd HH:mm")
+
+        # slider supports datetime directly as min_value and max_value
+        time_range = st.slider(
+            "Select Time Window",
+            min_value=min_time,
+            max_value=max_time,
+            value=(min_time, max_time),
+            step=datetime.timedelta(minutes=1),
+            format="MM/DD/Y HH:mm"
+        )
 
         filtered = df_counts[(df_counts["minute"] >= time_range[0]) & (df_counts["minute"] <= time_range[1])]
         fig_line = px.line(
@@ -161,45 +140,37 @@ if uploaded_file is not None:
         )
         st.plotly_chart(fig_line, use_container_width=True)
 
-    # Search/filter section
-    with st.expander("🔍 Filter or Search User-Agents"):
-        search_input = st.text_input("Search term (case-insensitive, substring):", "")
-        if search_input:
-            generic_filtered = {k:v for k,v in generic_bot_uas.items() if search_input.lower() in k.lower()}
-            llm_filtered     = {k:v for k,v in llm_bot_uas.items()     if search_input.lower() in k.lower()}
-        else:
-            generic_filtered = generic_bot_uas
-            llm_filtered     = llm_bot_uas
+    st.subheader("🔍 Search/Filter User-Agents")
+    search_input = st.text_input("Search term (case-insensitive substring):", "")
+    if search_input:
+        generic_filtered = {k:v for k,v in generic_bot_uas.items() if search_input.lower() in k.lower()}
+        llm_filtered     = {k:v for k,v in llm_bot_uas.items()     if search_input.lower() in k.lower()}
+    else:
+        generic_filtered = generic_bot_uas
+        llm_filtered     = llm_bot_uas
 
-        df_gen_f = pd.DataFrame(list(generic_filtered.items()), columns=["User-Agent","Count"]) \
-                      .sort_values(by="Count", ascending=False).reset_index(drop=True)
-        df_llm_f = pd.DataFrame(list(llm_filtered.items()), columns=["User-Agent","Count"]) \
-                      .sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_gen_f = pd.DataFrame(list(generic_filtered.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_llm_f = pd.DataFrame(list(llm_filtered.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
 
-        st.write("Generic Bots matching search:")
-        st.dataframe(df_gen_f, use_container_width=True)
-        st.write("LLM/AI Bots matching search:")
-        st.dataframe(df_llm_f, use_container_width=True)
+    st.write("Generic Bots matching search:")
+    st.dataframe(df_gen_f, use_container_width=True)
+    st.write("LLM/AI Bots matching search:")
+    st.dataframe(df_llm_f, use_container_width=True)
 
-    # Full tables
     st.subheader("🤖 All Generic Bot User-Agents")
-    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
-                    .sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_generic, use_container_width=True)
 
     st.subheader("🧩 All LLM/AI Bot User-Agents")
-    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
-                 .sort_values(by="Count", ascending=False).reset_index(drop=True)
+    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]).sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
-    # Export section
     st.subheader("📥 Download Results")
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm     = df_llm.to_csv(index=False).encode('utf-8')
     st.download_button("Download Generic Bots CSV", csv_generic, "generic_bots.csv", "text/csv", key="dl-generic")
-    st.download_button("Download LLM/AI Bots CSV", csv_llm,     "llm_bots.csv",     "text/csv", key="dl-llm")
+    st.download_button("Download LLM/AI Bots CSV", csv_llm,     "llm_bots.csv",     "text/csv",     key="dl-llm")
 
     st.success("✅ Analysis complete.")
-
 else:
     st.warning("Please upload a log file to begin analysis.")
