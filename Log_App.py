@@ -6,7 +6,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# --- Styling ---
+# Styling
 st.markdown(
     """
     <style>
@@ -38,7 +38,7 @@ ai_llm_bot_patterns = [
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
 if uploaded_file is not None:
-    st.info("⏳ Processing file — please wait…")
+    st.info("⏳ Processing file — large files may take some time…")
     text_stream = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
 
     total_requests = 0
@@ -49,7 +49,6 @@ if uploaded_file is not None:
     generic_bot_uas = {}
     llm_bot_uas = {}
 
-    # Improved log line parsing pattern
     log_pattern = re.compile(
         r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
         r'"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+" '
@@ -71,27 +70,19 @@ if uploaded_file is not None:
 
         ua = m.group("agent").strip()
 
-        # Extract simplified bot name
-        bot_name_match = re.search(r'\b([A-Za-z0-9\-_]+(?:Bot|User))\b', ua, flags=re.IGNORECASE)
-        if bot_name_match:
-            bot_name = bot_name_match.group(1)
-        else:
-            bot_name = ua  # fallback when no bot name matched
-
         if bot_regex.search(ua):
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
                 llm_bot_requests += 1
-                llm_bot_uas[bot_name] = llm_bot_uas.get(bot_name, 0) + 1
+                llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
             else:
                 generic_bot_requests += 1
-                generic_bot_uas[bot_name] = generic_bot_uas.get(bot_name, 0) + 1
+                generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
         else:
             others_requests += 1
 
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests} lines…")
 
-    # Metrics display
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total_requests:,}")
@@ -99,7 +90,6 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
-    # Composition chart
     st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
@@ -114,23 +104,21 @@ if uploaded_file is not None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Data tables
-    st.subheader("🤖 All Generic Bot Names")
-    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["Bot Name","Count"]) \
+    st.subheader("🤖 All Generic Bot User-Agents")
+    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_generic, use_container_width=True)
 
-    st.subheader("🧩 All LLM/AI Bot Names")
-    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["Bot Name","Count"]) \
+    st.subheader("🧩 All LLM/AI Bot User-Agents")
+    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
-    # Export results
     st.subheader("📥 Export Results")
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Generic Bot Names CSV", csv_generic, "generic_bot_names.csv", "text/csv", key="download-generic")
-    st.download_button("Download LLM Bot Names CSV", csv_llm, "llm_bot_names.csv", "text/csv", key="download-llm")
+    st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
+    st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
 
     st.success("✅ Analysis complete.")
 else:
