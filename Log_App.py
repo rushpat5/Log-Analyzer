@@ -6,7 +6,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# --- Header ---
+# ------------------- Styling -------------------
 st.markdown(
     """
     <style>
@@ -22,12 +22,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ------------------- Header -------------------
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
 st.caption("Upload a webserver log file to analyze traffic, detect crawlers, and identify AI/LLM bots.")
 
-uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log", "txt", "gz", "bz2"])
+uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
 
-# --- Bot definitions ---
+# ------------------- Bot definitions -------------------
 generic_bot_patterns = [
     r'Googlebot', r'Bingbot', r'AhrefsBot', r'SemrushBot', r'YandexBot',
     r'DuckDuckBot', r'crawler', r'spider'
@@ -40,13 +41,13 @@ ai_llm_bot_patterns = [
 ]
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
+# ------------------- Processing -------------------
 if uploaded_file is not None:
-    st.info("⏳ Processing file — this may take some time...")
+    st.info("⏳ Processing file — this may take a while for large files...")
     buffer = io.TextIOWrapper(uploaded_file, encoding='utf-8', errors='ignore')
 
     total, bot_total, llm_total = 0, 0, 0
     bot_uas, llm_uas = {}, {}
-    timeline = []
 
     for line in buffer:
         total += 1
@@ -66,16 +67,15 @@ if uploaded_file is not None:
 
     human_total = total - bot_total
 
-    # --- KPIs ---
+    # ------------------- KPIs -------------------
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Requests", f"{total:,}")
     col2.metric("Bot Requests", f"{bot_total:,}")
     col3.metric("AI/LLM Bot Requests", f"{llm_total:,}")
     col4.metric("Human Requests", f"{human_total:,}")
 
-    # --- Charts ---
+    # ------------------- Pie chart -------------------
     st.subheader("📊 Bot Traffic Breakdown")
-
     data = {
         "Category": ["Humans", "Generic Bots", "LLM/AI Bots"],
         "Requests": [human_total, bot_total - llm_total, llm_total],
@@ -86,18 +86,18 @@ if uploaded_file is not None:
                      title="Overall Traffic Composition")
     st.plotly_chart(fig_pie, use_container_width=True)
 
-    # --- Tables ---
-    st.subheader("🤖 Top Generic Bot User-Agents")
+    # ------------------- Data tables -------------------
+    st.subheader("🤖 All Generic Bot User-Agents")
     df_bots = pd.DataFrame(list(bot_uas.items()), columns=["User-Agent", "Count"]).sort_values(
         by="Count", ascending=False
-    )
-    st.dataframe(df_bots.head(20), use_container_width=True)
+    ).reset_index(drop=True)
+    st.dataframe(df_bots, use_container_width=True)
 
-    st.subheader("🧩 Top AI / LLM Bot User-Agents")
+    st.subheader("🧩 All AI / LLM Bot User-Agents")
     df_llm = pd.DataFrame(list(llm_uas.items()), columns=["User-Agent", "Count"]).sort_values(
         by="Count", ascending=False
-    )
-    st.dataframe(df_llm.head(20), use_container_width=True)
+    ).reset_index(drop=True)
+    st.dataframe(df_llm, use_container_width=True)
 
     st.success("✅ Processing complete.")
 else:
