@@ -22,8 +22,14 @@ st.markdown(
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
 st.caption("Upload a web server log file to detect bots (generic & LLM) and Others (non-matched).")
 
-uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=["log","txt","gz","bz2"])
+# File uploader — allows any extension now
+uploaded_file = st.file_uploader(
+    "Upload log file (~3 GB max)",
+    type=None,  # allow any file type
+    help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt, .gz, etc.)"
+)
 
+# Bot pattern definitions
 generic_bot_patterns = [
     r'Googlebot', r'Bingbot', r'AhrefsBot', r'SemrushBot', r'YandexBot',
     r'DuckDuckBot', r'crawler', r'spider'
@@ -49,6 +55,7 @@ if uploaded_file is not None:
     llm_bot_uas = {}
     others_uas = {}
 
+    # Regex pattern for Combined Log Format
     log_pattern = re.compile(
         r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
         r'"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+" '
@@ -65,7 +72,6 @@ if uploaded_file is not None:
 
         m = log_pattern.match(line)
         if not m:
-            # cannot parse -> count as Others
             others_requests += 1
             continue
 
@@ -85,6 +91,7 @@ if uploaded_file is not None:
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests} lines…")
 
+    # Key Metrics
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total_requests:,}")
@@ -92,6 +99,7 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
+    # Pie chart
     st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
@@ -106,21 +114,25 @@ if uploaded_file is not None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # Generic bots
     st.subheader("🤖 All Generic Bot User-Agents")
     df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_generic, use_container_width=True)
 
+    # LLM bots
     st.subheader("🧩 All LLM/AI Bot User-Agents")
     df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
+    # Others
     st.subheader("🌀 All Others (non-matched) User-Agents")
     df_others = pd.DataFrame(list(others_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_others, use_container_width=True)
 
+    # Downloads
     st.subheader("📥 Export Results")
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
