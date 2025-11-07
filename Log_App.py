@@ -162,4 +162,10 @@ if uploaded_file is not None:
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
     csv_others = df_others.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Generic_
+    st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
+    st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
+    st.download_button("Download Others User-Agents CSV", csv_others, "others_user_agents.csv", "text/csv", key="download-others")
+
+    st.success("✅ Analysis complete.")
+else:
+    st.warning("Please upload a log file to begin analysis.")
