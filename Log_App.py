@@ -2,22 +2,11 @@ import streamlit as st
 import pandas as pd
 import io
 import re
-import unicodedata
 import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
-
-st.markdown("""
-<style>
-body {background-color:#0f1117;color:#e8e8e8;}
-.stMetric {background:#1c1f2b;border-radius:12px;padding:10px;}
-div[data-testid="stDataFrame"] table {border-radius:10px;overflow:hidden;}
-.block-container {padding-top:2rem;}
-</style>
-""", unsafe_allow_html=True)
-
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Detects bots, lists URLs and status codes from real logs (Googlebot/2.1 supported).")
+st.caption("Detects bots (e.g., Googlebot) and lists URLs with status codes.")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
 
@@ -32,71 +21,50 @@ ai_llm_bot_patterns = [
     "youbot", "mistralai-user"
 ]
 
-def normalize(s):
-    # clean to plain ascii
-    s = s.strip()
-    s = unicodedata.normalize("NFKD", s)
-    return re.sub(r"[^\x00-\x7F]", "", s).lower()
-
 def identify_bot(ua: str):
-    ua_norm = normalize(ua)
+    ua = ua.lower()
     for p in ai_llm_bot_patterns:
-        if p in ua_norm:
+        if p in ua:
             return "LLM/AI"
     for p in generic_bot_patterns:
-        if p in ua_norm:
+        if p in ua:
             return "Generic"
     return None
 
 if uploaded_file:
     st.info("⏳ Processing file — please wait…")
-
     text_stream = io.TextIOWrapper(uploaded_file, encoding="latin-1", errors="ignore")
 
     total = generic = llm = others = 0
-    generic_uas, llm_uas, others_uas = {}, {}, {}
     bot_hits = []
 
-    log_pattern = re.compile(
-        r'(?P<ip>\d+\.\d+\.\d+\.\d+).*?"(?P<method>[A-Z]+)\s+(?P<path>\S+)[^"]*"\s+(?P<status>\d{3})[^"]*"(?:[^"]*)"\s+"(?P<agent>[^"]*)"'
-    )
+    # flexible pattern: get method, path, status, last quoted (UA)
+    base_pattern = re.compile(r'"([A-Z]+)\s+([^"]+)\s+HTTP/[^"]*"\s+(\d{3}).*?"([^"]*)"$')
 
     for raw in text_stream:
         total += 1
         line = raw.strip()
         if not line:
             continue
-
+        # strip prefix like access.log:####
         if ":" in line and line.split(":")[0].endswith(".log"):
-            parts = line.split(":", 2)
-            if len(parts) == 3:
-                line = parts[2].strip()
+            line = line.split(":", 2)[-1].strip()
 
-        m = log_pattern.search(line)
+        m = base_pattern.search(line)
         if not m:
             others += 1
             continue
 
-        ua = m.group("agent").strip()
-        ua_norm = normalize(ua)
-        path = m.group("path")
-        status = m.group("status")
-
+        method, path, status, ua = m.groups()
         bot_type = identify_bot(ua)
         if bot_type == "Generic":
             generic += 1
-            generic_uas[ua] = generic_uas.get(ua, 0) + 1
             bot_hits.append({"Bot Type": "Generic", "User-Agent": ua, "URL": path, "Status": status})
         elif bot_type == "LLM/AI":
             llm += 1
-            llm_uas[ua] = llm_uas.get(ua, 0) + 1
             bot_hits.append({"Bot Type": "LLM/AI", "User-Agent": ua, "URL": path, "Status": status})
         else:
             others += 1
-            others_uas[ua] = others_uas.get(ua, 0) + 1
-
-        if total % 200000 == 0:
-            st.write(f"Processed {total:,} lines…")
 
     # metrics
     st.subheader("📌 Key Metrics")
@@ -115,14 +83,13 @@ if uploaded_file:
                  title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
+    # bot table
     st.subheader("🔍 Detailed Bot Activity")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
-        df_hits = df_hits.sort_values(by=["Bot Type", "User-Agent", "URL"]).reset_index(drop=True)
         st.dataframe(df_hits, use_container_width=True)
-        st.download_button("Download Bot Hits CSV",
-                           df_hits.to_csv(index=False).encode("utf-8"),
-                           "bot_hits.csv", "text/csv")
+        csv_hits = df_hits.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Bot Hits CSV", csv_hits, "bot_hits.csv", "text/csv")
     else:
         st.info("No bot hits detected in this log file.")
 else:
