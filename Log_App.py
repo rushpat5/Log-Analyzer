@@ -3,7 +3,7 @@ import pandas as pd
 import re
 
 # -----------------------------
-# Load file safely (no chardet)
+# Load file safely
 # -----------------------------
 def load_log_file(uploaded_file):
     try:
@@ -14,7 +14,7 @@ def load_log_file(uploaded_file):
     return text.splitlines()
 
 # -----------------------------
-# Bot detection patterns
+# Bot patterns
 # -----------------------------
 bot_patterns = {
     "Googlebot": r"googlebot",
@@ -35,15 +35,14 @@ def classify_bot(user_agent):
     return "Others"
 
 # -----------------------------
-# Parse log lines
+# Flexible Log Parser
 # -----------------------------
 def parse_log(lines):
     data = []
     log_pattern = (
-        r'(?P<ip>\S+) - - \[(?P<datetime>[^\]]+)\] '
-        r'"(?P<method>\S+) (?P<url>\S+) (?P<protocol>[^"]+)" '
-        r'(?P<status>\d{3}) (?P<size>\S+) "(?P<referrer>[^"]*)" "(?P<useragent>[^"]*)"'
+        r'(?P<ip>\d+\.\d+\.\d+\.\d+).*?\[(?P<datetime>[^\]]+)\]\s+"(?P<method>GET|POST|HEAD|PUT|DELETE|OPTIONS)\s+(?P<url>\S+)\s+(?P<protocol>HTTP\/[0-9\.]+)"\s+(?P<status>\d{3})\s+(?P<size>\S+)\s+"(?P<referrer>[^"]*)"\s+"(?P<useragent>[^"]*)"'
     )
+
     for line in lines:
         m = re.search(log_pattern, line)
         if m:
@@ -113,4 +112,4 @@ if uploaded_file:
         status_counts.columns = ["Status", "Count"]
         st.dataframe(status_counts)
     else:
-        st.error("No valid log entries found in the uploaded file.")
+        st.error("No valid log entries found — check if the log format matches standard access logs (combined format).")
