@@ -5,8 +5,9 @@ import re
 import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
+
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Detects bots (e.g., Googlebot) and lists URLs with status codes.")
+st.caption("Detects bots (e.g. Googlebot, GPTBot) and lists URLs + status codes, even with multiline logs.")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
 
@@ -22,12 +23,12 @@ ai_llm_bot_patterns = [
 ]
 
 def identify_bot(ua: str):
-    ua = ua.lower()
+    ua_lower = ua.lower()
     for p in ai_llm_bot_patterns:
-        if p in ua:
+        if p in ua_lower:
             return "LLM/AI"
     for p in generic_bot_patterns:
-        if p in ua:
+        if p in ua_lower:
             return "Generic"
     return None
 
@@ -35,27 +36,42 @@ if uploaded_file:
     st.info("⏳ Processing file — please wait…")
     text_stream = io.TextIOWrapper(uploaded_file, encoding="latin-1", errors="ignore")
 
+    # combine physical lines into complete log entries
+    buffer = []
+    entries = []
+    for line in text_stream:
+        line = line.rstrip("\n")
+        if line.startswith("access.log") or re.match(r'^\d+\.\d+\.\d+\.\d+', line):
+            # start of a new log entry
+            if buffer:
+                entries.append(" ".join(buffer))
+                buffer = []
+            buffer.append(line)
+        else:
+            # continuation line (likely user-agent)
+            buffer.append(line)
+    if buffer:
+        entries.append(" ".join(buffer))
+
     total = generic = llm = others = 0
     bot_hits = []
 
-    # flexible pattern: get method, path, status, last quoted (UA)
-    base_pattern = re.compile(r'"([A-Z]+)\s+([^"]+)\s+HTTP/[^"]*"\s+(\d{3}).*?"([^"]*)"$')
+    pattern = re.compile(r'"([A-Z]+)\s+(\S+)\s+HTTP[^"]*"\s+(\d{3})[^"]*"(?:[^"]*)"\s*"([^"]+)"')
 
-    for raw in text_stream:
+    for entry in entries:
         total += 1
-        line = raw.strip()
-        if not line:
-            continue
         # strip prefix like access.log:####
-        if ":" in line and line.split(":")[0].endswith(".log"):
-            line = line.split(":", 2)[-1].strip()
+        if ":" in entry and entry.split(":")[0].endswith(".log"):
+            entry = entry.split(":", 2)[-1].strip()
 
-        m = base_pattern.search(line)
+        m = pattern.search(entry)
         if not m:
             others += 1
             continue
 
         method, path, status, ua = m.groups()
+        ua = ua.strip()
+
         bot_type = identify_bot(ua)
         if bot_type == "Generic":
             generic += 1
@@ -66,7 +82,7 @@ if uploaded_file:
         else:
             others += 1
 
-    # metrics
+    # display
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total:,}")
@@ -83,7 +99,6 @@ if uploaded_file:
                  title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
-    # bot table
     st.subheader("🔍 Detailed Bot Activity")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
