@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 import re
-import chardet
 import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
@@ -17,11 +16,11 @@ div[data-testid="stDataFrame"] table {border-radius:10px;overflow:hidden;}
 """, unsafe_allow_html=True)
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Detects bots (e.g., Googlebot, GPTBot) and lists all URLs hit with status codes. Supports multiline and mixed-encoding logs.")
+st.caption("Detects bots (e.g., Googlebot, GPTBot) and lists all URLs hit with status codes. Handles multiline and mixed-encoding logs.")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
 
-# Bot patterns
+# --- Bot detection patterns ---
 generic_bot_patterns = [
     "googlebot", "bingbot", "ahrefsbot", "semrushbot", "yandexbot",
     "duckduckbot", "crawler", "spider"
@@ -43,19 +42,27 @@ def identify_bot(ua: str):
             return "Generic"
     return None
 
+
 if uploaded_file:
     st.info("⏳ Processing file — please wait…")
 
-    # Auto-detect encoding robustly
+    # --- Robust decoding without external dependencies ---
     raw_bytes = uploaded_file.read()
-    enc = chardet.detect(raw_bytes).get("encoding", "utf-8")
-    text_stream = io.StringIO(raw_bytes.decode(enc, errors="ignore"))
+    text_stream = None
+    for enc_try in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text_stream = io.StringIO(raw_bytes.decode(enc_try))
+            break
+        except Exception:
+            continue
+    if text_stream is None:
+        st.error("❌ Could not decode the log file. Please upload as UTF-8, UTF-16, or Latin-1 text.")
+        st.stop()
 
-    # Join multiline log entries
+    # --- Merge multiline log entries ---
     buffer, entries = [], []
     for line in text_stream:
         line = line.rstrip("\n")
-        # new entry likely starts with IP or file prefix
         if line.startswith("access.log") or re.match(r"^\d{1,3}(\.\d{1,3}){3}", line):
             if buffer:
                 entries.append(" ".join(buffer))
@@ -69,7 +76,7 @@ if uploaded_file:
     total = generic = llm = others = 0
     bot_hits = []
 
-    # Regex for core fields: METHOD PATH STATUS ... USER-AGENT
+    # --- Flexible regex for common log formats ---
     pattern = re.compile(
         r'"([A-Z]+)\s+(\S+)\s+HTTP[^"]*"\s+(\d{3})[^"]*"(?:[^"]*)"\s*"([^"]+)"'
     )
@@ -97,7 +104,7 @@ if uploaded_file:
         else:
             others += 1
 
-    # Display metrics
+    # --- Key Metrics ---
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total:,}")
@@ -105,7 +112,7 @@ if uploaded_file:
     c3.metric("Bot Requests (LLM/AI)", f"{llm:,}")
     c4.metric("Others (non-matched)", f"{others:,}")
 
-    # Pie chart
+    # --- Pie Chart ---
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
         "Count": [generic, llm, others]
@@ -115,7 +122,7 @@ if uploaded_file:
                  title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Bot details table
+    # --- Detailed Bot Activity ---
     st.subheader("🔍 Detailed Bot Activity")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
