@@ -20,13 +20,12 @@ st.markdown(
 )
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a web server log file to detect bots (generic & LLM) and Others (non-matched).")
+st.caption("Upload a web server log file to detect bots (generic & LLM) and list accessed URLs with status codes.")
 
-# File uploader — allows any extension now
 uploaded_file = st.file_uploader(
     "Upload log file (~3 GB max)",
-    type=None,  # allow any file type
-    help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt, .gz, etc.)"
+    type=None,
+    help="Upload any web server log file (e.g. access.log, .txt, .gz, etc.)"
 )
 
 # Bot pattern definitions
@@ -54,8 +53,9 @@ if uploaded_file is not None:
     generic_bot_uas = {}
     llm_bot_uas = {}
     others_uas = {}
+    bot_hits = []
 
-    # Regex pattern for Combined Log Format
+    # Regex for Combined Log Format
     log_pattern = re.compile(
         r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] '
         r'"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+" '
@@ -76,14 +76,28 @@ if uploaded_file is not None:
             continue
 
         ua = m.group("agent").strip()
+        path = m.group("path")
+        status = m.group("status")
 
         if bot_regex.search(ua):
             if any(re.search(p, ua, flags=re.IGNORECASE) for p in ai_llm_bot_patterns):
                 llm_bot_requests += 1
                 llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
+                bot_hits.append({
+                    "Bot Type": "LLM/AI",
+                    "User-Agent": ua,
+                    "URL": path,
+                    "Status": status
+                })
             else:
                 generic_bot_requests += 1
                 generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
+                bot_hits.append({
+                    "Bot Type": "Generic",
+                    "User-Agent": ua,
+                    "URL": path,
+                    "Status": status
+                })
         else:
             others_requests += 1
             others_uas[ua] = others_uas.get(ua, 0) + 1
@@ -99,7 +113,7 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
-    # Pie chart
+    # Pie Chart
     st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
@@ -113,6 +127,17 @@ if uploaded_file is not None:
         title="Requests by Category"
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    # Detailed Bot Activity
+    st.subheader("🔍 Detailed Bot Activity")
+    df_hits = pd.DataFrame(bot_hits)
+    if not df_hits.empty:
+        df_hits = df_hits.sort_values(by=["Bot Type", "User-Agent", "URL"]).reset_index(drop=True)
+        st.dataframe(df_hits, use_container_width=True)
+        csv_hits = df_hits.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Detailed Bot Hits CSV", csv_hits, "bot_hits.csv", "text/csv", key="download-bot-hits")
+    else:
+        st.info("No bot hits detected in this log file.")
 
     # Generic bots
     st.subheader("🤖 All Generic Bot User-Agents")
@@ -137,10 +162,4 @@ if uploaded_file is not None:
     csv_generic = df_generic.to_csv(index=False).encode('utf-8')
     csv_llm = df_llm.to_csv(index=False).encode('utf-8')
     csv_others = df_others.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Generic Bot Data CSV", csv_generic, "generic_bots.csv", "text/csv", key="download-generic")
-    st.download_button("Download LLM Bot Data CSV", csv_llm, "llm_bots.csv", "text/csv", key="download-llm")
-    st.download_button("Download Others User-Agents CSV", csv_others, "others_user_agents.csv", "text/csv", key="download-others")
-
-    st.success("✅ Analysis complete.")
-else:
-    st.warning("Please upload a log file to begin analysis.")
+    st.download_button("Download Generic_
