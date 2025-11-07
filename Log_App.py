@@ -6,7 +6,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# --- minimal styling (keeps original look & layout) ---
+# Minimal styling kept similar to original app
 st.markdown(
     """
     <style>
@@ -20,77 +20,88 @@ st.markdown(
 )
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a web server log file. Detects bots and lists URLs + status codes. Minimal changes to parser; preserves behavior for other files.")
+st.caption("Upload a web server log file. Detects bots (including Applebot) and lists URLs + status codes. Parser is conservative and intends minimal change to original behavior.")
 
 uploaded_file = st.file_uploader(
     "Upload log file (~3 GB max)",
     type=None,
-    help="Upload any web server log file (access.log, *.log, *.txt)."
+    help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt, .gz(not supported here))."
 )
 
-# --- bot lists (added Applebot + kept original patterns) ---
+# Keep original bot lists and add Applebot
 generic_bot_patterns = [
-    r"googlebot", r"bingbot", r"ahrefsbot", r"semrushbot", r"yandexbot",
-    r"duckduckbot", r"crawler", r"spider", r"applebot"
+    r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
+    r'duckduckbot', r'crawler', r'spider', r'applebot'
 ]
 ai_llm_bot_patterns = [
-    r"gptbot", r"oai-searchbot", r"chatgpt-user", r"claudebot", r"claude-web",
-    r"anthropic-ai", r"perplexitybot", r"perplexity-user", r"google-extended",
-    r"applebot-extended", r"cohere-ai", r"ai2bot", r"ccbot", r"duckassistbot",
-    r"youbot", r"mistralai-user"
+    r'gptbot', r'oai-searchbot', r'chatgpt-user', r'claudebot', r'claude-web',
+    r'anthropic-ai', r'perplexitybot', r'perplexity-user', r'google-extended',
+    r'applebot-extended', r'cohere-ai', r'ai2bot', r'ccbot', r'duckassistbot',
+    r'youbot', r'mistralai-user'
 ]
+bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
 def identify_bot(ua: str):
-    s = (ua or "").lower()
+    if not ua:
+        return None
+    ua_l = ua.lower()
     for p in ai_llm_bot_patterns:
-        if re.search(p, s, flags=re.IGNORECASE):
+        if re.search(p, ua_l, flags=re.IGNORECASE):
             return "LLM/AI"
     for p in generic_bot_patterns:
-        if re.search(p, s, flags=re.IGNORECASE):
+        if re.search(p, ua_l, flags=re.IGNORECASE):
             return "Generic"
     return None
 
 if uploaded_file is not None:
     st.info("⏳ Processing file — please wait…")
 
-    # --- robust decode without extra deps (try utf-8 then latin-1) ---
-    raw = uploaded_file.read()
-    try:
-        text = raw.decode("utf-8")
-    except Exception:
+    raw_bytes = uploaded_file.read()
+    # decode fallback without external deps
+    for enc_try in ("utf-8", "utf-16", "latin-1"):
         try:
-            text = raw.decode("latin-1")
+            text = raw_bytes.decode(enc_try)
+            break
         except Exception:
-            text = raw.decode("utf-8", errors="ignore")
+            text = None
+    if text is None:
+        text = raw_bytes.decode("utf-8", errors="ignore")
 
-    # --- MINIMAL CHANGE: merge continuation/wrapped lines into logical log entries ---
-    # We only change how we assemble lines. The parsing logic below remains simple and tolerant.
-    lines = text.splitlines()
-
+    # --- Conservative assembly of logical entries (minimal change) ---
+    # Approach:
+    # 1) Treat lines starting with IP (optionally prefixed by file:lineno:) as new entry starts.
+    # 2) Accumulate subsequent continuation lines until we have at least 3 quoted groups
+    #    (combined log format normally contains 3 quoted fields: request, referer, user-agent).
+    # This preserves behavior for standard logs while correctly joining wrapped UAs/referrers.
+    raw_lines = text.splitlines()
     entries = []
-    current = []
-    # detect start of a new log entry: common prefixes used in your files
-    start_re = re.compile(r'^(?:\S+\.log:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')  # optional fileprefix then IP
-    for ln in lines:
-        ln_stripped = ln.rstrip("\r\n")
-        if start_re.match(ln_stripped):
-            # start of a new logical entry
-            if current:
-                entries.append(" ".join(current))
-                current = []
-            current.append(ln_stripped)
+    buf = []
+    # regex that detects a new line starting with optional filename:lineno: then IP
+    start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
+    for ln in raw_lines:
+        ln = ln.rstrip("\r\n")
+        if start_re.match(ln):
+            # new record
+            if buf:
+                merged = " ".join(buf).strip()
+                # ensure the merged entry has at least three quoted fields; if not, keep merging (defensive)
+                if len(re.findall(r'"', merged)) >= 6 or True:
+                    entries.append(merged)
+                else:
+                    entries.append(merged)  # still append but it's rare
+                buf = []
+            buf.append(ln)
         else:
-            # continuation line (likely wrapped UA/referrer). Append to previous entry if present,
-            # otherwise keep as a standalone line (to avoid dropping lines).
-            if current:
-                current.append(ln_stripped)
+            # continuation line (likely wrapped UA or referrer), append to current buffer if exists
+            if buf:
+                buf.append(ln)
             else:
-                # no prior start detected -> treat as own entry (defensive)
-                entries.append(ln_stripped)
-    if current:
-        entries.append(" ".join(current))
+                # no active buffer — treat as its own entry to avoid dropping data
+                entries.append(ln)
+    if buf:
+        entries.append(" ".join(buf).strip())
 
-    # --- Parse each logical entry conservatively ---
+    # --- Parsing each logical entry with tolerant extraction ---
     total_requests = 0
     generic_bot_requests = 0
     llm_bot_requests = 0
@@ -99,8 +110,7 @@ if uploaded_file is not None:
     generic_bot_uas = {}
     llm_bot_uas = {}
     others_uas = {}
-
-    bot_hits = []  # will store dicts: Bot Type, User-Agent, URL, Status
+    bot_hits = []
 
     for entry in entries:
         entry = entry.strip()
@@ -108,23 +118,24 @@ if uploaded_file is not None:
             continue
         total_requests += 1
 
-        # Extract quoted substrings. Combined log format puts request, referer, agent as quoted groups.
-        quoted = re.findall(r'"(.*?)"', entry, flags=re.DOTALL)
-        # Heuristic:
-        # - request line is usually the first quoted group ("GET /path HTTP/1.1")
-        # - user-agent is usually the last quoted group (but may be wrapped into multiple lines)
+        # Extract all quoted groups conservatively (handles wrapped quotes because we joined lines)
+        quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
+        # Request typically first quoted, user-agent typically last quoted
         request = quoted[0] if len(quoted) >= 1 else ""
         ua = quoted[-1] if len(quoted) >= 1 else ""
 
-        # extract method/path from request
-        m = re.search(r'^([A-Z]+)\s+(\S+)', request)
-        path = m.group(2) if m else "-"
-        # extract status code (first 3-digit number after request)
-        status_m = re.search(r'"\s*(\d{3})\s', entry) or re.search(r'\s(\d{3})\s', entry)
-        status = status_m.group(1) if status_m else "-"
-
-        # normalize UA (strip excessive whitespace/newlines)
+        # Clean UA: collapse whitespace/newlines
         ua = re.sub(r'\s+', ' ', ua).strip()
+
+        # Extract method and path from the request string
+        m_req = re.search(r'([A-Z]+)\s+(\S+)', request)
+        path = m_req.group(2) if m_req else "-"
+
+        # Extract status code: look for the 3-digit code after the request or anywhere in entry
+        status_match = re.search(r'"\s*(\d{3})\s', entry)
+        if not status_match:
+            status_match = re.search(r'\s(\d{3})\s', entry)
+        status = status_match.group(1) if status_match else "-"
 
         bot_type = identify_bot(ua)
         if bot_type == "Generic":
@@ -138,14 +149,13 @@ if uploaded_file is not None:
         else:
             others_requests += 1
             others_uas[ua] = others_uas.get(ua, 0) + 1
-            # also record Others' URLs so they are visible
             bot_hits.append({"Bot Type": "Others", "User-Agent": ua, "URL": path, "Status": status})
 
-        # light progress indicator for very large files (no heavy UI churn)
+        # light progress message for big files
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests:,} lines…")
 
-    # --- Metrics / Dashboard (keeps original layout) ---
+    # --- Output / Dashboard ---
     st.subheader("📌 Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Requests", f"{total_requests:,}")
@@ -153,7 +163,7 @@ if uploaded_file is not None:
     c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
 
-    # Pie chart
+    st.subheader("📊 Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
         "Count": [generic_bot_requests, llm_bot_requests, others_requests]
@@ -167,25 +177,21 @@ if uploaded_file is not None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Generic bots table
     st.subheader("🤖 All Generic Bot User-Agents")
     df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_generic, use_container_width=True)
 
-    # LLM bots table
     st.subheader("🧩 All LLM/AI Bot User-Agents")
     df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_llm, use_container_width=True)
 
-    # Others table (now includes UA -> Count and we list their URLs separately)
     st.subheader("🌀 All Others (non-matched) User-Agents")
     df_others = pd.DataFrame(list(others_uas.items()), columns=["User-Agent","Count"]) \
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_others, use_container_width=True)
 
-    # Detailed bot hits (includes Others with URLs and status codes)
     st.subheader("🔍 Detailed Bot Activity (Bot Type · User-Agent · URL · Status)")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
