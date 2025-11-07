@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import unicodedata
 import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
@@ -16,7 +17,7 @@ div[data-testid="stDataFrame"] table {border-radius:10px;overflow:hidden;}
 """, unsafe_allow_html=True)
 
 st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Counts bot hits and lists URLs with status codes.")
+st.caption("Detects bots, lists URLs and status codes from real logs (Googlebot/2.1 supported).")
 
 uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
 
@@ -31,13 +32,19 @@ ai_llm_bot_patterns = [
     "youbot", "mistralai-user"
 ]
 
+def normalize(s):
+    # clean to plain ascii
+    s = s.strip()
+    s = unicodedata.normalize("NFKD", s)
+    return re.sub(r"[^\x00-\x7F]", "", s).lower()
+
 def identify_bot(ua: str):
-    s = ua.lower()
+    ua_norm = normalize(ua)
     for p in ai_llm_bot_patterns:
-        if p in s:
+        if p in ua_norm:
             return "LLM/AI"
     for p in generic_bot_patterns:
-        if p in s:
+        if p in ua_norm:
             return "Generic"
     return None
 
@@ -50,9 +57,8 @@ if uploaded_file:
     generic_uas, llm_uas, others_uas = {}, {}, {}
     bot_hits = []
 
-    # target pattern: ip [...] "METHOD path HTTP/x" status bytes "ref" "agent"
-    pattern = re.compile(
-        r'(?P<ip>\d+\.\d+\.\d+\.\d+).*?"(?P<method>[A-Z]+)\s+(?P<path>\S+)[^"]*"\s+(?P<status>\d{3}).*?"(?P<ref>[^"]*)"\s+"(?P<agent>[^"]+)"'
+    log_pattern = re.compile(
+        r'(?P<ip>\d+\.\d+\.\d+\.\d+).*?"(?P<method>[A-Z]+)\s+(?P<path>\S+)[^"]*"\s+(?P<status>\d{3})[^"]*"(?:[^"]*)"\s+"(?P<agent>[^"]*)"'
     )
 
     for raw in text_stream:
@@ -61,18 +67,18 @@ if uploaded_file:
         if not line:
             continue
 
-        # remove access.log:####: prefix
         if ":" in line and line.split(":")[0].endswith(".log"):
             parts = line.split(":", 2)
             if len(parts) == 3:
                 line = parts[2].strip()
 
-        m = pattern.search(line)
+        m = log_pattern.search(line)
         if not m:
             others += 1
             continue
 
         ua = m.group("agent").strip()
+        ua_norm = normalize(ua)
         path = m.group("path")
         status = m.group("status")
 
@@ -109,16 +115,15 @@ if uploaded_file:
                  title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
-    # detailed hits
     st.subheader("🔍 Detailed Bot Activity")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
         df_hits = df_hits.sort_values(by=["Bot Type", "User-Agent", "URL"]).reset_index(drop=True)
         st.dataframe(df_hits, use_container_width=True)
-        st.download_button("Download Bot Hits CSV", df_hits.to_csv(index=False).encode("utf-8"),
+        st.download_button("Download Bot Hits CSV",
+                           df_hits.to_csv(index=False).encode("utf-8"),
                            "bot_hits.csv", "text/csv")
     else:
         st.info("No bot hits detected in this log file.")
-
 else:
     st.warning("Please upload a log file to begin analysis.")
