@@ -3,7 +3,7 @@ import pandas as pd
 import re
 
 # -----------------------------
-# Load file safely
+# Load and normalize file
 # -----------------------------
 def load_log_file(uploaded_file):
     try:
@@ -11,10 +11,14 @@ def load_log_file(uploaded_file):
     except Exception:
         uploaded_file.seek(0)
         text = uploaded_file.read().decode("latin-1", errors="ignore")
+    # Merge broken multi-line log entries
+    text = re.sub(r"\n(?=\S+- - \[)", "\n", text)  # keep new records intact
+    text = text.replace("\n", " ")  # flatten wrapped lines
+    text = re.sub(r'(?<=HTTP/1\.[01]")\s*', "\n", text)  # separate distinct requests
     return text.splitlines()
 
 # -----------------------------
-# Bot patterns
+# Bot detection patterns
 # -----------------------------
 bot_patterns = {
     "Googlebot": r"googlebot",
@@ -40,7 +44,7 @@ def classify_bot(user_agent):
 def parse_log(lines):
     data = []
     log_pattern = (
-        r'(?P<ip>\d+\.\d+\.\d+\.\d+).*?\[(?P<datetime>[^\]]+)\]\s+"(?P<method>GET|POST|HEAD|PUT|DELETE|OPTIONS)\s+(?P<url>\S+)\s+(?P<protocol>HTTP\/[0-9\.]+)"\s+(?P<status>\d{3})\s+(?P<size>\S+)\s+"(?P<referrer>[^"]*)"\s+"(?P<useragent>[^"]*)"'
+        r'(?P<ip>\d+\.\d+\.\d+\.\d+)\s+- - \[(?P<datetime>[^\]]+)\]\s+"(?P<method>\S+)\s+(?P<url>\S+)\s+(?P<protocol>HTTP/[0-9.]+)"\s+(?P<status>\d{3})\s+(?P<size>\S+)\s+"(?P<referrer>[^"]*)"\s+"(?P<useragent>[^"]*)"'
     )
 
     for line in lines:
@@ -53,7 +57,7 @@ def parse_log(lines):
 # Streamlit layout
 # -----------------------------
 st.set_page_config(page_title="Bot Log Analyzer", layout="wide")
-st.title("📊 Advanced Bot Log Analyzer (Includes 'Others')")
+st.title("📊 Advanced Bot Log Analyzer (Robust for Applebot Logs)")
 
 uploaded_file = st.file_uploader("Upload access log file", type=["log", "txt"])
 
@@ -82,7 +86,6 @@ if uploaded_file:
         )
         st.bar_chart(summary_data.set_index("Bot Type"))
 
-        # Detailed Bot Activity
         st.subheader("🔍 Detailed Bot Activity (All Bots + Others)")
         detailed = (
             df.groupby(["Bot Type", "useragent", "url", "status"])
@@ -92,7 +95,6 @@ if uploaded_file:
         )
         st.dataframe(detailed, use_container_width=True)
 
-        # Others URLs
         st.subheader("🌀 All 'Others' User-Agents and URLs")
         others_df = (
             df[df["Bot Type"] == "Others"]
@@ -106,10 +108,9 @@ if uploaded_file:
         else:
             st.dataframe(others_df, use_container_width=True)
 
-        # Status summary
         st.subheader("📈 HTTP Status Code Breakdown")
         status_counts = df["status"].value_counts().reset_index()
         status_counts.columns = ["Status", "Count"]
         st.dataframe(status_counts)
     else:
-        st.error("No valid log entries found — check if the log format matches standard access logs (combined format).")
+        st.error("No valid log entries found — your file may contain wrapped or malformed log lines not matching standard access log patterns.")
