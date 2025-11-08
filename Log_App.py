@@ -4,10 +4,11 @@ import io
 import re
 import plotly.express as px
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
+import hashlib
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
-# Minimal styling kept similar to original app
 st.markdown(
     """
     <style>
@@ -20,16 +21,16 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a web server log file. Detects bots (including Applebot) and lists URLs + status codes. Parser is conservative and intends minimal change to original behavior.")
+st.title("🧠 Log Analyzer – Web Traffic & Bot Insights (Extended)")
+st.caption("Upload a server access log. Extracts time, client IP, referer, bytes, method, path, status class, UA-derived flags and lightweight session heuristic.")
 
 uploaded_file = st.file_uploader(
     "Upload log file (~3 GB max)",
     type=None,
-    help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt, .gz(not supported here))."
+    help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt)."
 )
 
-# Keep original bot lists and add Applebot
+# Bot patterns (kept from original)
 generic_bot_patterns = [
     r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
     r'duckduckbot', r'crawler', r'spider', r'applebot'
@@ -40,7 +41,6 @@ ai_llm_bot_patterns = [
     r'applebot-extended', r'cohere-ai', r"ai2bot", r'ccbot', r'duckassistbot',
     r'youbot', r'mistralai-user'
 ]
-bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
 
 def identify_bot(ua: str):
     if not ua:
@@ -55,33 +55,29 @@ def identify_bot(ua: str):
     return None
 
 def extract_time_from_entry(entry: str):
-    """
-    Extract timestamp inside the first [...] pair.
-    Attempt to parse into a timezone-aware datetime using format:
-      %d/%b/%Y:%H:%M:%S %z
-    If parsing fails, return the raw bracket content.
-    Returns ISO 8601 string when parsed, otherwise the raw captured string or "-" if none.
-    """
     m = re.search(r'\[([^\]]+)\]', entry)
     if not m:
-        return "-"
+        return None
     ts = m.group(1).strip()
-    # common log format: 19/Sep/2025:00:30:33 +0530
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
         try:
             dt = datetime.strptime(ts, fmt)
-            # if parsed without tz, leave naive datetime
-            return dt.isoformat()
+            return dt
         except Exception:
             continue
-    # fallback: return raw
-    return ts
+    return None  # parsing failed
+
+# helper to extract filename/lineno/ip at start if present
+start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
+
+# treat file lines starting with IP (optionally prefixed by file:lineno:) as new entries
+start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
 
 if uploaded_file is not None:
-    st.info("⏳ Processing file — please wait…")
+    st.info("Processing file — this may take a while for large files.")
 
     raw_bytes = uploaded_file.read()
-    # decode fallback without external deps
+    # decode fallback
     for enc_try in ("utf-8", "utf-16", "latin-1"):
         try:
             text = raw_bytes.decode(enc_try)
@@ -91,39 +87,26 @@ if uploaded_file is not None:
     if text is None:
         text = raw_bytes.decode("utf-8", errors="ignore")
 
-    # --- Conservative assembly of logical entries (minimal change) ---
-    # Approach:
-    # 1) Treat lines starting with IP (optionally prefixed by file:lineno:) as new entry starts.
-    # 2) Accumulate subsequent continuation lines until we have at least 3 quoted groups
-    #    (combined log format normally contains 3 quoted fields: request, referer, user-agent).
-    # This preserves behavior for standard logs while correctly joining wrapped UAs/referrers.
+    # assemble logical entries (join wrapped lines)
     raw_lines = text.splitlines()
     entries = []
     buf = []
-    # regex that detects a new line starting with optional filename:lineno: then IP
-    start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
     for ln in raw_lines:
         ln = ln.rstrip("\r\n")
         if start_re.match(ln):
-            # new record
             if buf:
-                merged = " ".join(buf).strip()
-                # ensure the merged entry has at least three quoted fields; if not, keep merging (defensive)
-                # (preserve prior behavior: we append anyway)
-                entries.append(merged)
+                entries.append(" ".join(buf).strip())
                 buf = []
             buf.append(ln)
         else:
-            # continuation line (likely wrapped UA or referrer), append to current buffer if exists
             if buf:
                 buf.append(ln)
             else:
-                # no active buffer — treat as its own entry to avoid dropping data
                 entries.append(ln)
     if buf:
         entries.append(" ".join(buf).strip())
 
-    # --- Parsing each logical entry with tolerant extraction ---
+    # counters and containers
     total_requests = 0
     generic_bot_requests = 0
     llm_bot_requests = 0
@@ -132,7 +115,7 @@ if uploaded_file is not None:
     generic_bot_uas = {}
     llm_bot_uas = {}
     others_uas = {}
-    bot_hits = []
+    hits = []
 
     for entry in entries:
         entry = entry.strip()
@@ -140,32 +123,60 @@ if uploaded_file is not None:
             continue
         total_requests += 1
 
-        # Extract all quoted groups conservatively (handles wrapped quotes because we joined lines)
-        quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
-        # Request typically first quoted, user-agent typically last quoted
-        request = quoted[0] if len(quoted) >= 1 else ""
-        ua = quoted[-1] if len(quoted) >= 1 else ""
+        # file/lineno/ip
+        m_start = start_info_re.match(entry)
+        file_src = m_start.group("file") if m_start and m_start.group("file") else "-"
+        lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else "-"
+        client_ip = m_start.group("ip") if m_start else "-"
 
-        # Clean UA: collapse whitespace/newlines
+        # quoted fields (request, referer, ua are typically inside "...")
+        quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
+        request = quoted[0].replace("\n", " ").strip() if len(quoted) >= 1 else ""
+        referer = quoted[1].replace("\n", " ").strip() if len(quoted) >= 3 else (quoted[1].strip() if len(quoted) == 2 else "-")
+        ua = quoted[-1].replace("\n", " ").strip() if len(quoted) >= 1 else ""
+
+        # normalize UA
         ua = re.sub(r'\s+', ' ', ua).strip()
 
-        # Extract method and path from the request string
-        m_req = re.search(r'([A-Z]+)\s+(\S+)', request)
+        # method, path, http version
+        m_req = re.search(r'([A-Z]+)\s+(\S+)(?:\s+HTTP/(\d\.\d))?', request)
+        method = m_req.group(1) if m_req else "-"
         path = m_req.group(2) if m_req else "-"
+        http_ver = m_req.group(3) if m_req and m_req.group(3) else "-"
 
-        # Extract status code: look for the 3-digit code after the request or anywhere in entry
-        status_match = re.search(r'"\s*(\d{3})\s', entry)
-        if not status_match:
-            status_match = re.search(r'\s(\d{3})\s', entry)
-        status = status_match.group(1) if status_match else "-"
+        # status and bytes: try to find status-code followed by bytes
+        m_status_bytes = re.search(r'"\s*(\d{3})\s+(-|\d+)', entry)
+        if not m_status_bytes:
+            # fallback: any three-digit token and next token maybe bytes
+            m_status_bytes = re.search(r'\s(\d{3})\s+(-|\d+)', entry)
+        status = m_status_bytes.group(1) if m_status_bytes else "-"
+        bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
 
-        # Extract time (new): produce ISO-format string when possible
-        time_iso = extract_time_from_entry(entry)
+        # time
+        dt = extract_time_from_entry(entry)  # datetime or None
+        time_iso = dt.isoformat() if dt else "-"
+
+        # derived fields
+        status_class = f"{status[0]}xx" if status and status.isdigit() else "-"
+        parsed_url = urlparse(path) if path and path != "-" else None
+        path_clean = parsed_url.path if parsed_url else path
+        query_string = parsed_url.query if parsed_url else ""
+        query_params = dict(parse_qs(parsed_url.query)) if parsed_url and parsed_url.query else {}
+        is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', path, re.IGNORECASE))
+        is_mobile = bool(re.search(r'\b(Mobile|iPhone|Android)\b', ua, re.I))
+        section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
+        # time buckets
+        hour_bucket = None
+        date_bucket = None
+        if dt:
+            hour_bucket = dt.replace(minute=0, second=0, microsecond=0)
+            date_bucket = dt.date()
+
+        # lightweight session heuristic using ip + ua + hour
+        sid_base = f"{client_ip}|{ua}|{hour_bucket.isoformat() if hour_bucket else time_iso}"
+        session_id = hashlib.sha1(sid_base.encode('utf-8')).hexdigest()[:10]
 
         bot_type = identify_bot(ua)
-        hit = {"Bot Type": bot_type or "Others", "User-Agent": ua, "URL": path, "Status": status, "Time": time_iso}
-        bot_hits.append(hit)
-
         if bot_type == "Generic":
             generic_bot_requests += 1
             generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
@@ -176,73 +187,84 @@ if uploaded_file is not None:
             others_requests += 1
             others_uas[ua] = others_uas.get(ua, 0) + 1
 
-        # light progress message for big files
+        hit = {
+            "File": file_src,
+            "LineNo": lineno,
+            "ClientIP": client_ip,
+            "Time": time_iso,
+            "Date": str(date_bucket) if date_bucket else "-",
+            "HourBucket": hour_bucket.isoformat() if hour_bucket else "-",
+            "Method": method,
+            "Path": path,
+            "PathClean": path_clean,
+            "Query": query_string,
+            "QueryParams": query_params,
+            "Status": status,
+            "StatusClass": status_class,
+            "Bytes": bytes_sent,
+            "Referer": referer,
+            "User-Agent": ua,
+            "Bot Type": bot_type or "Others",
+            "IsStatic": is_static,
+            "IsMobile": is_mobile,
+            "Section": section,
+            "SessionID": session_id,
+            "HTTP_Version": http_ver
+        }
+        hits.append(hit)
+
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests:,} lines…")
 
-    # --- Output / Dashboard ---
-    st.subheader("📌 Key Metrics")
-    c1, c2, c3, c4 = st.columns(4)
+    # build DataFrame
+    df_hits = pd.DataFrame(hits)
+    st.subheader("Key Metrics")
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Requests", f"{total_requests:,}")
-    c2.metric("Bot Requests (Generic)", f"{generic_bot_requests:,}")
-    c3.metric("Bot Requests (LLM/AI)", f"{llm_bot_requests:,}")
+    c2.metric("Bot (Generic)", f"{generic_bot_requests:,}")
+    c3.metric("Bot (LLM/AI)", f"{llm_bot_requests:,}")
     c4.metric("Others (non-matched)", f"{others_requests:,}")
+    c5.metric("Unique IPs", f"{df_hits['ClientIP'].nunique():,}" if not df_hits.empty else "0")
 
-    st.subheader("📊 Traffic Composition")
+    st.subheader("Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
         "Count": [generic_bot_requests, llm_bot_requests, others_requests]
     })
-    fig = px.pie(
-        df_comp,
-        names="Category",
-        values="Count",
-        color_discrete_sequence=["#3498db", "#9b59b6", "#2ecc71"],
-        title="Requests by Category"
-    )
+    fig = px.pie(df_comp, names="Category", values="Count", title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("🤖 All Generic Bot User-Agents")
-    df_generic = pd.DataFrame(list(generic_bot_uas.items()), columns=["User-Agent","Count"]) \
-        .sort_values(by="Count", ascending=False).reset_index(drop=True)
-    st.dataframe(df_generic, use_container_width=True)
+    st.subheader("Top Referers")
+    top_ref = df_hits["Referer"].value_counts().reset_index().head(10)
+    top_ref.columns = ["Referer", "Count"]
+    st.dataframe(top_ref, use_container_width=True)
 
-    st.subheader("🧩 All LLM/AI Bot User-Agents")
-    df_llm = pd.DataFrame(list(llm_bot_uas.items()), columns=["User-Agent","Count"]) \
-        .sort_values(by="Count", ascending=False).reset_index(drop=True)
-    st.dataframe(df_llm, use_container_width=True)
+    st.subheader("Top IPs")
+    top_ips = df_hits["ClientIP"].value_counts().reset_index().head(10)
+    top_ips.columns = ["ClientIP", "Count"]
+    st.dataframe(top_ips, use_container_width=True)
 
-    st.subheader("🌀 All Others (non-matched) User-Agents")
-    df_others = pd.DataFrame(list(others_uas.items()), columns=["User-Agent","Count"]) \
-        .sort_values(by="Count", ascending=False).reset_index(drop=True)
-    st.dataframe(df_others, use_container_width=True)
+    st.subheader("Static vs Dynamic Requests")
+    static_counts = df_hits["IsStatic"].value_counts().rename_axis("IsStatic").reset_index(name="Count")
+    static_counts["Label"] = static_counts["IsStatic"].apply(lambda v: "Static" if v else "Dynamic")
+    fig2 = px.pie(static_counts, names="Label", values="Count", title="Static vs Dynamic")
+    st.plotly_chart(fig2, use_container_width=True)
 
-    st.subheader("🔍 Detailed Bot Activity (Bot Type · Time · User-Agent · URL · Status)")
-    df_hits = pd.DataFrame(bot_hits)
+    st.subheader("Detailed Hits (filtered view)")
     if not df_hits.empty:
-        # Try to put Time early in the table and sort by Time when possible
-        if "Time" in df_hits.columns:
-            # if Time looks like ISO, convert to datetime for sorting where possible
-            try:
-                df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time"], errors="coerce")
-                df_hits = df_hits.sort_values(by=["Time_parsed", "Bot Type", "User-Agent"], ascending=[True, True, True])
-                df_hits = df_hits.drop(columns=["Time_parsed"])
-            except Exception:
-                df_hits = df_hits.sort_values(by=["Bot Type", "User-Agent", "URL", "Status"], ascending=[True,True,True,True])
-        else:
-            df_hits = df_hits.sort_values(by=["Bot Type","User-Agent","URL","Status"], ascending=[True,True,True,True])
-        # reorder columns to show Time near the front
-        cols = df_hits.columns.tolist()
-        if "Time" in cols:
-            cols = ["Bot Type", "Time"] + [c for c in cols if c not in ("Bot Type", "Time")]
-            df_hits = df_hits[cols]
-        df_hits = df_hits.reset_index(drop=True)
-        st.dataframe(df_hits, use_container_width=True)
-        csv_hits = df_hits.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Detailed Bot Hits CSV", csv_hits, "bot_hits.csv", "text/csv")
+        # parse Time into datetime for sorting/aggregation
+        df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time"], errors="coerce")
+        # show columns with Time and important derived fields first
+        cols_front = ["Bot Type", "Time", "ClientIP", "Method", "PathClean", "Status", "Bytes", "Referer", "User-Agent", "IsStatic", "IsMobile", "SessionID"]
+        cols_rest = [c for c in df_hits.columns if c not in cols_front + ["Time_parsed"]]
+        display_cols = [c for c in cols_front + cols_rest if c in df_hits.columns]
+        df_display = df_hits[display_cols].sort_values(by=["Time_parsed"], ascending=True).reset_index(drop=True)
+        st.dataframe(df_display, use_container_width=True)
+        csv_bytes = df_display.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Detailed CSV", csv_bytes, "detailed_hits.csv", "text/csv")
     else:
-        st.info("No bot hits detected in this log file.")
+        st.info("No parsed hits.")
 
-    st.success("✅ Analysis complete.")
+    st.success("Analysis complete.")
 else:
     st.warning("Please upload a log file to begin analysis.")
