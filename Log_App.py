@@ -1,14 +1,14 @@
 import streamlit as st
 import pandas as pd
-import io
 import re
-import plotly.express as px
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 import hashlib
+import plotly.express as px
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
+# Minimal styling
 st.markdown(
     """
     <style>
@@ -21,7 +21,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🧠 Log Analyzer – Web Traffic & Bot Insights (Extended)")
+st.title("🧠 Log Analyzer – Web Traffic & Bot Insights (Full)")
 st.caption("Upload a server access log. Extracts time, client IP, referer, bytes, method, path, status class, UA-derived flags and lightweight session heuristic.")
 
 uploaded_file = st.file_uploader(
@@ -30,7 +30,7 @@ uploaded_file = st.file_uploader(
     help="Upload any web server log file (e.g. access.log, access.log.2025.09.18, .txt)."
 )
 
-# Bot patterns (kept from original)
+# Bot patterns
 generic_bot_patterns = [
     r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
     r'duckduckbot', r'crawler', r'spider', r'applebot'
@@ -59,25 +59,25 @@ def extract_time_from_entry(entry: str):
     if not m:
         return None
     ts = m.group(1).strip()
+    # Try with timezone first, then without
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
         try:
             dt = datetime.strptime(ts, fmt)
             return dt
         except Exception:
             continue
-    return None  # parsing failed
+    return None
 
-# helper to extract filename/lineno/ip at start if present
-start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
-
-# treat file lines starting with IP (optionally prefixed by file:lineno:) as new entries
+# regex to detect start of a new logical entry: optional file:lineno: then IPv4
 start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
+start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
 
 if uploaded_file is not None:
     st.info("Processing file — this may take a while for large files.")
 
     raw_bytes = uploaded_file.read()
-    # decode fallback
+    # decode with fallbacks
+    text = None
     for enc_try in ("utf-8", "utf-16", "latin-1"):
         try:
             text = raw_bytes.decode(enc_try)
@@ -123,56 +123,65 @@ if uploaded_file is not None:
             continue
         total_requests += 1
 
-        # file/lineno/ip
+        # Extract file, line, client IP
         m_start = start_info_re.match(entry)
         file_src = m_start.group("file") if m_start and m_start.group("file") else "-"
         lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else "-"
         client_ip = m_start.group("ip") if m_start else "-"
 
-        # quoted fields (request, referer, ua are typically inside "...")
+        # Extract quoted fields: request, referer, user-agent (typical)
         quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
-        request = quoted[0].replace("\n", " ").strip() if len(quoted) >= 1 else ""
-        referer = quoted[1].replace("\n", " ").strip() if len(quoted) >= 3 else (quoted[1].strip() if len(quoted) == 2 else "-")
-        ua = quoted[-1].replace("\n", " ").strip() if len(quoted) >= 1 else ""
+        if len(quoted) >= 3:
+            request = quoted[0].replace("\n", " ").strip()
+            referer = quoted[1].replace("\n", " ").strip()
+            ua = quoted[-1].replace("\n", " ").strip()
+        elif len(quoted) == 2:
+            request = quoted[0].replace("\n", " ").strip()
+            referer = "-"
+            ua = quoted[1].replace("\n", " ").strip()
+        elif len(quoted) == 1:
+            request = quoted[0].replace("\n", " ").strip()
+            referer = "-"
+            ua = "-"
+        else:
+            request = referer = ua = "-"
 
-        # normalize UA
         ua = re.sub(r'\s+', ' ', ua).strip()
 
-        # method, path, http version
+        # Parse request: METHOD PATH HTTP/version
         m_req = re.search(r'([A-Z]+)\s+(\S+)(?:\s+HTTP/(\d\.\d))?', request)
         method = m_req.group(1) if m_req else "-"
         path = m_req.group(2) if m_req else "-"
-        http_ver = m_req.group(3) if m_req and m_req.group(3) else "-"
+        http_ver = m_req.group(3) if (m_req and m_req.group(3)) else "-"
 
-        # status and bytes: try to find status-code followed by bytes
+        # Status and bytes
         m_status_bytes = re.search(r'"\s*(\d{3})\s+(-|\d+)', entry)
         if not m_status_bytes:
-            # fallback: any three-digit token and next token maybe bytes
             m_status_bytes = re.search(r'\s(\d{3})\s+(-|\d+)', entry)
         status = m_status_bytes.group(1) if m_status_bytes else "-"
         bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
 
-        # time
-        dt = extract_time_from_entry(entry)  # datetime or None
+        # Time
+        dt = extract_time_from_entry(entry)
         time_iso = dt.isoformat() if dt else "-"
 
-        # derived fields
+        # Derived fields
         status_class = f"{status[0]}xx" if status and status.isdigit() else "-"
         parsed_url = urlparse(path) if path and path != "-" else None
-        path_clean = parsed_url.path if parsed_url else path
+        path_clean = parsed_url.path if parsed_url and parsed_url.path else path
         query_string = parsed_url.query if parsed_url else ""
         query_params = dict(parse_qs(parsed_url.query)) if parsed_url and parsed_url.query else {}
         is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', path, re.IGNORECASE))
         is_mobile = bool(re.search(r'\b(Mobile|iPhone|Android)\b', ua, re.I))
         section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
-        # time buckets
+
         hour_bucket = None
         date_bucket = None
         if dt:
             hour_bucket = dt.replace(minute=0, second=0, microsecond=0)
             date_bucket = dt.date()
 
-        # lightweight session heuristic using ip + ua + hour
+        # Lightweight session heuristic
         sid_base = f"{client_ip}|{ua}|{hour_bucket.isoformat() if hour_bucket else time_iso}"
         session_id = hashlib.sha1(sid_base.encode('utf-8')).hexdigest()[:10]
 
@@ -192,6 +201,7 @@ if uploaded_file is not None:
             "LineNo": lineno,
             "ClientIP": client_ip,
             "Time": time_iso,
+            "Time_parsed": dt,  # keep datetime here for robust sorting later
             "Date": str(date_bucket) if date_bucket else "-",
             "HourBucket": hour_bucket.isoformat() if hour_bucket else "-",
             "Method": method,
@@ -216,8 +226,14 @@ if uploaded_file is not None:
         if total_requests % 200000 == 0:
             st.write(f"Processed {total_requests:,} lines…")
 
-    # build DataFrame
+    # Build DataFrame
     df_hits = pd.DataFrame(hits)
+
+    # Ensure Time_parsed is a datetime dtype (if present as Python datetime objects, pandas will handle)
+    if "Time_parsed" in df_hits.columns:
+        df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time_parsed"], errors="coerce")
+
+    # Metrics
     st.subheader("Key Metrics")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Requests", f"{total_requests:,}")
@@ -226,6 +242,7 @@ if uploaded_file is not None:
     c4.metric("Others (non-matched)", f"{others_requests:,}")
     c5.metric("Unique IPs", f"{df_hits['ClientIP'].nunique():,}" if not df_hits.empty else "0")
 
+    # Traffic composition
     st.subheader("Traffic Composition")
     df_comp = pd.DataFrame({
         "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
@@ -234,31 +251,48 @@ if uploaded_file is not None:
     fig = px.pie(df_comp, names="Category", values="Count", title="Requests by Category")
     st.plotly_chart(fig, use_container_width=True)
 
+    # Top referers and IPs
     st.subheader("Top Referers")
-    top_ref = df_hits["Referer"].value_counts().reset_index().head(10)
+    top_ref = df_hits["Referer"].replace("-", pd.NA).value_counts().reset_index().head(10)
     top_ref.columns = ["Referer", "Count"]
     st.dataframe(top_ref, use_container_width=True)
 
     st.subheader("Top IPs")
-    top_ips = df_hits["ClientIP"].value_counts().reset_index().head(10)
+    top_ips = df_hits["ClientIP"].replace("-", pd.NA).value_counts().reset_index().head(10)
     top_ips.columns = ["ClientIP", "Count"]
     st.dataframe(top_ips, use_container_width=True)
 
+    # Static vs Dynamic
     st.subheader("Static vs Dynamic Requests")
     static_counts = df_hits["IsStatic"].value_counts().rename_axis("IsStatic").reset_index(name="Count")
     static_counts["Label"] = static_counts["IsStatic"].apply(lambda v: "Static" if v else "Dynamic")
     fig2 = px.pie(static_counts, names="Label", values="Count", title="Static vs Dynamic")
     st.plotly_chart(fig2, use_container_width=True)
 
+    # --- Detailed Hits (fixed sorting and display) ---
     st.subheader("Detailed Hits (filtered view)")
     if not df_hits.empty:
-        # parse Time into datetime for sorting/aggregation
-        df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time"], errors="coerce")
-        # show columns with Time and important derived fields first
+        # Prefer sorting by Time_parsed if any valid parsed times, otherwise fallback
+        if "Time_parsed" in df_hits.columns and df_hits["Time_parsed"].notna().any():
+            df_hits = df_hits.sort_values(
+                by=["Time_parsed", "Bot Type", "User-Agent"],
+                ascending=[True, True, True],
+                na_position="last"
+            )
+        else:
+            # stable fallback sort
+            sort_keys = [k for k in ["Bot Type", "User-Agent", "Path"] if k in df_hits.columns]
+            if sort_keys:
+                df_hits = df_hits.sort_values(by=sort_keys, ascending=[True]*len(sort_keys))
+            else:
+                df_hits = df_hits.reset_index(drop=True)
+
+        # Choose display columns (exclude internal Time_parsed)
         cols_front = ["Bot Type", "Time", "ClientIP", "Method", "PathClean", "Status", "Bytes", "Referer", "User-Agent", "IsStatic", "IsMobile", "SessionID"]
         cols_rest = [c for c in df_hits.columns if c not in cols_front + ["Time_parsed"]]
         display_cols = [c for c in cols_front + cols_rest if c in df_hits.columns]
-        df_display = df_hits[display_cols].sort_values(by=["Time_parsed"], ascending=True).reset_index(drop=True)
+
+        df_display = df_hits[display_cols].reset_index(drop=True)
         st.dataframe(df_display, use_container_width=True)
         csv_bytes = df_display.to_csv(index=False).encode("utf-8")
         st.download_button("Download Detailed CSV", csv_bytes, "detailed_hits.csv", "text/csv")
