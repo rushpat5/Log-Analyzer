@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import re
 import plotly.express as px
+from datetime import datetime
 
 st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
 
@@ -36,7 +37,7 @@ generic_bot_patterns = [
 ai_llm_bot_patterns = [
     r'gptbot', r'oai-searchbot', r'chatgpt-user', r'claudebot', r'claude-web',
     r'anthropic-ai', r'perplexitybot', r'perplexity-user', r'google-extended',
-    r'applebot-extended', r'cohere-ai', r'ai2bot', r'ccbot', r'duckassistbot',
+    r'applebot-extended', r'cohere-ai', r"ai2bot", r'ccbot', r'duckassistbot',
     r'youbot', r'mistralai-user'
 ]
 bot_regex = re.compile("|".join(generic_bot_patterns + ai_llm_bot_patterns), flags=re.IGNORECASE)
@@ -52,6 +53,29 @@ def identify_bot(ua: str):
         if re.search(p, ua_l, flags=re.IGNORECASE):
             return "Generic"
     return None
+
+def extract_time_from_entry(entry: str):
+    """
+    Extract timestamp inside the first [...] pair.
+    Attempt to parse into a timezone-aware datetime using format:
+      %d/%b/%Y:%H:%M:%S %z
+    If parsing fails, return the raw bracket content.
+    Returns ISO 8601 string when parsed, otherwise the raw captured string or "-" if none.
+    """
+    m = re.search(r'\[([^\]]+)\]', entry)
+    if not m:
+        return "-"
+    ts = m.group(1).strip()
+    # common log format: 19/Sep/2025:00:30:33 +0530
+    for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
+        try:
+            dt = datetime.strptime(ts, fmt)
+            # if parsed without tz, leave naive datetime
+            return dt.isoformat()
+        except Exception:
+            continue
+    # fallback: return raw
+    return ts
 
 if uploaded_file is not None:
     st.info("⏳ Processing file — please wait…")
@@ -85,10 +109,8 @@ if uploaded_file is not None:
             if buf:
                 merged = " ".join(buf).strip()
                 # ensure the merged entry has at least three quoted fields; if not, keep merging (defensive)
-                if len(re.findall(r'"', merged)) >= 6 or True:
-                    entries.append(merged)
-                else:
-                    entries.append(merged)  # still append but it's rare
+                # (preserve prior behavior: we append anyway)
+                entries.append(merged)
                 buf = []
             buf.append(ln)
         else:
@@ -137,19 +159,22 @@ if uploaded_file is not None:
             status_match = re.search(r'\s(\d{3})\s', entry)
         status = status_match.group(1) if status_match else "-"
 
+        # Extract time (new): produce ISO-format string when possible
+        time_iso = extract_time_from_entry(entry)
+
         bot_type = identify_bot(ua)
+        hit = {"Bot Type": bot_type or "Others", "User-Agent": ua, "URL": path, "Status": status, "Time": time_iso}
+        bot_hits.append(hit)
+
         if bot_type == "Generic":
             generic_bot_requests += 1
             generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
-            bot_hits.append({"Bot Type": "Generic", "User-Agent": ua, "URL": path, "Status": status})
         elif bot_type == "LLM/AI":
             llm_bot_requests += 1
             llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
-            bot_hits.append({"Bot Type": "LLM/AI", "User-Agent": ua, "URL": path, "Status": status})
         else:
             others_requests += 1
             others_uas[ua] = others_uas.get(ua, 0) + 1
-            bot_hits.append({"Bot Type": "Others", "User-Agent": ua, "URL": path, "Status": status})
 
         # light progress message for big files
         if total_requests % 200000 == 0:
@@ -192,10 +217,26 @@ if uploaded_file is not None:
         .sort_values(by="Count", ascending=False).reset_index(drop=True)
     st.dataframe(df_others, use_container_width=True)
 
-    st.subheader("🔍 Detailed Bot Activity (Bot Type · User-Agent · URL · Status)")
+    st.subheader("🔍 Detailed Bot Activity (Bot Type · Time · User-Agent · URL · Status)")
     df_hits = pd.DataFrame(bot_hits)
     if not df_hits.empty:
-        df_hits = df_hits.sort_values(by=["Bot Type","User-Agent","URL","Status"], ascending=[True,True,True,True]).reset_index(drop=True)
+        # Try to put Time early in the table and sort by Time when possible
+        if "Time" in df_hits.columns:
+            # if Time looks like ISO, convert to datetime for sorting where possible
+            try:
+                df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time"], errors="coerce")
+                df_hits = df_hits.sort_values(by=["Time_parsed", "Bot Type", "User-Agent"], ascending=[True, True, True])
+                df_hits = df_hits.drop(columns=["Time_parsed"])
+            except Exception:
+                df_hits = df_hits.sort_values(by=["Bot Type", "User-Agent", "URL", "Status"], ascending=[True,True,True,True])
+        else:
+            df_hits = df_hits.sort_values(by=["Bot Type","User-Agent","URL","Status"], ascending=[True,True,True,True])
+        # reorder columns to show Time near the front
+        cols = df_hits.columns.tolist()
+        if "Time" in cols:
+            cols = ["Bot Type", "Time"] + [c for c in cols if c not in ("Bot Type", "Time")]
+            df_hits = df_hits[cols]
+        df_hits = df_hits.reset_index(drop=True)
         st.dataframe(df_hits, use_container_width=True)
         csv_hits = df_hits.to_csv(index=False).encode('utf-8')
         st.download_button("Download Detailed Bot Hits CSV", csv_hits, "bot_hits.csv", "text/csv")
