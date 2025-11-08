@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 import hashlib
 import plotly.express as px
@@ -21,7 +21,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🧠 Log Analyzer – Web Traffic & Bot Insights (Full)")
+st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
 st.caption("Upload a server access log. Extracts time, client IP, referer, bytes, method, path, status class, UA-derived flags and lightweight session heuristic.")
 
 uploaded_file = st.file_uploader(
@@ -55,15 +55,17 @@ def identify_bot(ua: str):
     return None
 
 def extract_time_from_entry(entry: str):
+    """
+    Return a datetime object (may be timezone-aware if log contained an offset).
+    Parses common format like: 19/Sep/2025:00:30:33 +0530
+    """
     m = re.search(r'\[([^\]]+)\]', entry)
     if not m:
         return None
     ts = m.group(1).strip()
-    # Try with timezone first, then without
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
         try:
-            dt = datetime.strptime(ts, fmt)
-            return dt
+            return datetime.strptime(ts, fmt)
         except Exception:
             continue
     return None
@@ -161,9 +163,25 @@ if uploaded_file is not None:
         status = m_status_bytes.group(1) if m_status_bytes else "-"
         bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
 
-        # Time
-        dt = extract_time_from_entry(entry)
-        time_iso = dt.isoformat() if dt else "-"
+        # Time parsing and timezone-safe hour bucket (FIX applied)
+        dt = extract_time_from_entry(entry)  # may be timezone-aware or naive
+        if dt:
+            # Keep an ISO string of the original parsed datetime (this may include offset)
+            time_iso = dt.isoformat()
+            # Convert to UTC if tz-aware, otherwise leave as-is
+            if dt.tzinfo is not None:
+                dt_utc = dt.astimezone(timezone.utc)
+            else:
+                dt_utc = dt
+            # For consistent hourly bucketing and sorting, drop tzinfo after converting to UTC
+            time_parsed = dt_utc.replace(tzinfo=None)
+            hour_bucket = time_parsed.replace(minute=0, second=0, microsecond=0)
+            date_bucket = hour_bucket.date()
+        else:
+            time_iso = "-"
+            time_parsed = None
+            hour_bucket = None
+            date_bucket = None
 
         # Derived fields
         status_class = f"{status[0]}xx" if status and status.isdigit() else "-"
@@ -174,12 +192,6 @@ if uploaded_file is not None:
         is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', path, re.IGNORECASE))
         is_mobile = bool(re.search(r'\b(Mobile|iPhone|Android)\b', ua, re.I))
         section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
-
-        hour_bucket = None
-        date_bucket = None
-        if dt:
-            hour_bucket = dt.replace(minute=0, second=0, microsecond=0)
-            date_bucket = dt.date()
 
         # Lightweight session heuristic
         sid_base = f"{client_ip}|{ua}|{hour_bucket.isoformat() if hour_bucket else time_iso}"
@@ -200,8 +212,8 @@ if uploaded_file is not None:
             "File": file_src,
             "LineNo": lineno,
             "ClientIP": client_ip,
-            "Time": time_iso,
-            "Time_parsed": dt,  # keep datetime here for robust sorting later
+            "Time": time_iso,                       # original ISO (may include offset)
+            "Time_parsed": time_parsed,             # UTC-naive datetime used for sorting/aggregation
             "Date": str(date_bucket) if date_bucket else "-",
             "HourBucket": hour_bucket.isoformat() if hour_bucket else "-",
             "Method": method,
@@ -229,7 +241,7 @@ if uploaded_file is not None:
     # Build DataFrame
     df_hits = pd.DataFrame(hits)
 
-    # Ensure Time_parsed is a datetime dtype (if present as Python datetime objects, pandas will handle)
+    # Ensure Time_parsed is a datetime dtype (pandas will coerce Python datetimes)
     if "Time_parsed" in df_hits.columns:
         df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time_parsed"], errors="coerce")
 
@@ -280,7 +292,6 @@ if uploaded_file is not None:
                 na_position="last"
             )
         else:
-            # stable fallback sort
             sort_keys = [k for k in ["Bot Type", "User-Agent", "Path"] if k in df_hits.columns]
             if sort_keys:
                 df_hits = df_hits.sort_values(by=sort_keys, ascending=[True]*len(sort_keys))
@@ -288,7 +299,7 @@ if uploaded_file is not None:
                 df_hits = df_hits.reset_index(drop=True)
 
         # Choose display columns (exclude internal Time_parsed)
-        cols_front = ["Bot Type", "Time", "ClientIP", "Method", "PathClean", "Status", "Bytes", "Referer", "User-Agent", "IsStatic", "IsMobile", "SessionID"]
+        cols_front = ["Bot Type", "Time", "ClientIP", "Method", "PathClean", "Status", "Bytes", "Referer", "User-Agent", "IsStatic", "IsMobile", "SessionID", "File", "LineNo", "Date", "HourBucket"]
         cols_rest = [c for c in df_hits.columns if c not in cols_front + ["Time_parsed"]]
         display_cols = [c for c in cols_front + cols_rest if c in df_hits.columns]
 
