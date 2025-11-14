@@ -1,262 +1,423 @@
 import streamlit as st
 import pandas as pd
 import re
-from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+import io
+import codecs
 import hashlib
+from datetime import datetime, timedelta, timezone
+from dateutil import parser as dtparser
+from urllib.parse import urlparse, parse_qs, unquote
 import plotly.express as px
+from typing import Iterator, Tuple, Optional, Dict, Any
 
-st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
+# =====================================================================
+# PAGE CONFIG
+# =====================================================================
+st.set_page_config(page_title="Bot-Focused Log Analyzer", layout="wide")
 
-# Styling retained
-st.markdown(
-    """
-    <style>
-      body {background-color: #0f1117; color: #e8e8e8;}
-      .stMetric {background: #1c1f2b; border-radius:12px; padding:10px;}
-      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
-      .block-container {padding-top:2rem;}
-    </style>
-    """,
-    unsafe_allow_html=True
+# =====================================================================
+# VERIFIED TOP BOT UA PATTERNS (no invention, no speculation)
+# =====================================================================
+VERIFIED_TOP_BOTS = [
+
+    # Search engine crawlers
+    r'\bGooglebot\b',
+    r'\bGooglebot-Image\b',
+    r'\bGooglebot-News\b',
+    r'\bGooglebot-Video\b',
+    r'\bGooglebot-Mobile\b',
+    r'\bGoogle-Extended\b',
+    r'\bBingbot\b',
+    r'\bBingPreview\b',
+    r'\bDuckDuckBot\b',
+    r'\bBaiduspider\b',
+    r'\bYandexBot\b',
+    r'\bYandexImages\b',
+    r'\bYisouSpider\b',
+    r'\bMojeekBot\b',
+    r'\bSogou web spider\b',
+    r'\b360Spider\b',
+    r'\bCoccocbot\b',
+    r'\bCoccocbot-web\b',
+    r'\bSemrushBot\b',
+
+    # AI search crawlers
+    r'\bPerplexityBot\b',
+    r'\bOAI-SearchBot\b',
+    r'\bClaude-SearchBot\b',
+    r'\bYouBot\b',
+    r'\bAddSearchBot\b',
+    r'\bAmazonbot\b',
+    r'\bPetalBot\b',
+
+    # AI data scrapers
+    r'\bGPTBot\b',
+    r'\bBytespider\b',
+    r'\bCCBot\b',
+    r'\bDiffbot\b',
+    r'\bomgili\b',
+    r'\bApplebot-Extended\b',
+    r'\bmeta-externalfetcher\b',
+    r'\bmeta-externalagent\b',
+    r'\bwebzio-extended\b',
+
+    # AI/LLM user-driven fetchers
+    r'\bChatGPT-User\b',
+    r'\bClaude-User\b',
+    r'\bClaudeBot\b',
+    r'\bPerplexity-User\b',
+    r'\bMistralAI-User\b',
+
+    # Enterprise / misc
+    r'\bAhrefsBot\b',
+    r'\bMJ12bot\b',
+    r'\bfacebookexternalhit\b',
+    r'\bSlackbot\b',
+    r'\bTwitterbot\b',
+]
+
+# Placeholders for extension
+CUSTOM_TOP50_EXTENSIONS = [
+    # Add additional UA tokens exactly as they appear in real logs.
+]
+
+ALL_BOT_PATTERNS = VERIFIED_TOP_BOTS + CUSTOM_TOP50_EXTENSIONS
+
+AI_LLM_BOT_PATTERNS = [
+    r'\bGPTBot\b',
+    r'\bChatGPT-User\b',
+    r'\bOAI-SearchBot\b',
+    r'\bClaude-User\b',
+    r'\bClaudeBot\b',
+    r'\bClaude-SearchBot\b',
+    r'\bPerplexityBot\b',
+    r'\bPerplexity-User\b',
+    r'\bMistralAI-User\b',
+    r'\bBytespider\b',
+    r'\bCCBot\b',
+    r'\bDiffbot\b',
+    r'\bomgili\b',
+    r'\bApplebot-Extended\b',
+    r'\bmeta-externalagent\b',
+    r'\bmeta-externalfetcher\b',
+]
+
+GENERIC_BOT_PATTERNS = [p for p in ALL_BOT_PATTERNS if p not in AI_LLM_BOT_PATTERNS]
+
+AI_LLM_BOT_RE = re.compile("|".join(AI_LLM_BOT_PATTERNS), re.I)
+GENERIC_BOT_RE = re.compile("|".join(GENERIC_BOT_PATTERNS), re.I)
+
+# =====================================================================
+# REGEXES AND CONSTANTS
+# =====================================================================
+START_INFO_RE = re.compile(
+    r'^(?:(?P<file>[^:\s]+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s'
 )
 
-st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a server access log. Extracts time, client IP, referer, bytes, method, path, status class, UA-derived flags and session heuristics.")
+COMBINED_LOG_RE = re.compile(
+    r'(?P<remote>\S+)\s+(?P<ident>\S+)\s+(?P<authuser>\S+)\s+\[(?P<time>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+(?P<status>\d{3}|-)\s+(?P<bytes>\d+|-)\s+"(?P<referer>[^"]*)"\s+"(?P<ua>[^"]*)"',
+    flags=re.DOTALL,
+)
 
-uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
+COMMON_LOG_RE = re.compile(
+    r'(?P<remote>\S+)\s+(?P<ident>\S+)\s+(?P<authuser>\S+)\s+\[(?P<time>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+(?P<status>\d{3}|-)\s+(?P<bytes>\d+|-)',
+    flags=re.DOTALL,
+)
 
-# Bot patterns
-generic_bot_patterns = [
-    r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
-    r'duckduckbot', r'crawler', r'spider', r'applebot'
-]
-ai_llm_bot_patterns = [
-    r'gptbot', r'oai-searchbot', r'chatgpt-user', r'claudebot', r'claude-web',
-    r'anthropic-ai', r'perplexitybot', r'perplexity-user', r'google-extended',
-    r'applebot-extended', r'cohere-ai', r'ai2bot', r'ccbot', r'duckassistbot',
-    r'youbot', r'mistralai-user'
-]
+STATIC_RE = re.compile(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', re.I)
 
-def identify_bot(ua: str):
-    if not ua:
-        return None
-    ua_l = ua.lower()
-    for p in ai_llm_bot_patterns:
-        if re.search(p, ua_l):
-            return "LLM/AI"
-    for p in generic_bot_patterns:
-        if re.search(p, ua_l):
-            return "Generic"
-    return None
+SESSION_TIMEOUT_MINUTES = 30
 
-def extract_time_from_entry(entry: str):
-    m = re.search(r'\[([^\]]+)\]', entry)
-    if not m:
-        return None
-    ts = m.group(1).strip()
-    for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
-        try:
-            return datetime.strptime(ts, fmt)
-        except Exception:
-            continue
-    return None
+# =====================================================================
+# UTILITY FUNCTIONS
+# =====================================================================
+def compute_sha256_of_bytes(b: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(b)
+    return h.hexdigest()
 
-start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
-start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
-
-if uploaded_file is not None:
-    st.info("Processing file…")
-
-    raw_bytes = uploaded_file.read()
-    text = None
+def detect_encoding_from_sample(b: bytes, sample_size: int = 65536) -> str:
+    sample = b[:sample_size]
     for enc in ("utf-8", "utf-16", "latin-1"):
         try:
-            text = raw_bytes.decode(enc)
-            break
+            sample.decode(enc)
+            return enc
         except Exception:
             continue
-    if text is None:
-        text = raw_bytes.decode("utf-8", errors="ignore")
+    return "utf-8"
 
-    raw_lines = text.splitlines()
-    entries = []
-    buf = []
-    for ln in raw_lines:
-        ln = ln.rstrip("\r\n")
-        if start_re.match(ln):
-            if buf:
-                entries.append(" ".join(buf).strip())
-                buf = []
-            buf.append(ln)
-        else:
-            if buf:
-                buf.append(ln)
-            else:
-                entries.append(ln)
-    if buf:
-        entries.append(" ".join(buf).strip())
+def text_line_iterator_from_bytes(b: bytes, encoding: Optional[str] = None) -> Iterator[str]:
+    if encoding is None:
+        encoding = detect_encoding_from_sample(b)
+    bio = io.BytesIO(b)
+    reader = codecs.getreader(encoding)(bio, errors="replace")
+    for line in reader:
+        yield line.rstrip("\n").rstrip("\r")
 
-    hits = []
-    total_requests = 0
-    generic_bot_requests = llm_bot_requests = others_requests = 0
-    generic_bot_uas = {}
-    llm_bot_uas = {}
-    others_uas = {}
+def parse_time_preserve_tz(ts: str) -> Optional[datetime]:
+    if not ts or ts.strip() == "-":
+        return None
+    try:
+        return dtparser.parse(ts, fuzzy=False)
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(ts, "%d/%b/%Y:%H:%M:%S %z")
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(ts, "%d/%b/%Y:%H:%M:%S")
+    except Exception:
+        return None
 
-    for entry in entries:
-        entry = entry.strip()
-        if not entry:
-            continue
-        total_requests += 1
+def parse_request_field(request: str):
+    if not request or request == "-":
+        return "-", "-", "-"
+    m = re.match(r'([A-Z]+)\s+(\S+)(?:\s+HTTP/(\d\.\d))?', request)
+    if m:
+        return m.group(1), m.group(2), m.group(3) if m.group(3) else "-"
+    return "-", request, "-"
 
-        m_start = start_info_re.match(entry)
+def safe_urlparse(path: str):
+    if not path or path == "-":
+        return path, "", {}
+    try:
+        p = urlparse(unquote(path))
+        return p.path, p.query, parse_qs(p.query)
+    except Exception:
+        return path, "", {}
+
+def anonymize_ip(ip: str, salt: str):
+    if not ip or ip == "-":
+        return ip
+    h = hashlib.sha256((salt + "|" + ip).encode()).hexdigest()
+    return h[:16]
+
+# =====================================================================
+# BOT IDENTIFICATION
+# =====================================================================
+def identify_bot_from_ua(ua: str) -> Optional[str]:
+    if not ua or ua.strip() == "-":
+        return None
+    if AI_LLM_BOT_RE.search(ua):
+        return "AI/LLM"
+    if GENERIC_BOT_RE.search(ua):
+        return "GenericBot"
+    return None
+
+# =====================================================================
+# PARSING
+# =====================================================================
+def parse_single_entry(entry: str) -> Optional[dict]:
+    try:
+        m_start = START_INFO_RE.match(entry)
         file_src = m_start.group("file") if m_start and m_start.group("file") else "-"
         lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else "-"
         client_ip = m_start.group("ip") if m_start else "-"
 
-        quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
-        if len(quoted) >= 3:
-            request = quoted[0].strip()
-            referer = quoted[1].strip()
-            ua = quoted[-1].strip()
-        elif len(quoted) == 2:
-            request = quoted[0].strip()
-            referer = "-"
-            ua = quoted[1].strip()
-        elif len(quoted) == 1:
-            request = quoted[0].strip()
-            referer = "-"
-            ua = "-"
+        m = COMBINED_LOG_RE.search(entry)
+        if m:
+            time_str = m.group("time")
+            request = m.group("request").strip() if m.group("request") else "-"
+            referer = m.group("referer").strip()
+            ua = re.sub(r'\s+', ' ', m.group("ua").strip())
+            status = m.group("status")
+            bytes_sent = m.group("bytes")
         else:
-            request = referer = ua = "-"
-
-        ua = re.sub(r'\s+', ' ', ua).strip()
-
-        m_req = re.search(r'([A-Z]+)\s+(\S+)(?:\s+HTTP/(\d\.\d))?', request)
-        method = m_req.group(1) if m_req else "-"
-        path = m_req.group(2) if m_req else "-"
-        http_ver = m_req.group(3) if (m_req and m_req.group(3)) else "-"
-
-        m_status_bytes = re.search(r'"\s*(\d{3})\s+(-|\d+)', entry)
-        if not m_status_bytes:
-            m_status_bytes = re.search(r'\s(\d{3})\s+(-|\d+)', entry)
-        status = m_status_bytes.group(1) if m_status_bytes else "-"
-        bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
-
-        # === Fixed time parsing logic ===
-        dt = extract_time_from_entry(entry)
-        if dt:
-            time_iso = dt.isoformat()  # Keep full timezone
-            # Keep local (log) time — do not convert to UTC — keep minutes and seconds
-            if dt.tzinfo is not None:
-                dt_local = dt.replace(tzinfo=None)
+            m2 = COMMON_LOG_RE.search(entry)
+            if m2:
+                time_str = m2.group("time")
+                request = m2.group("request").strip()
+                referer = "-"
+                ua = "-"
+                status = m2.group("status")
+                bytes_sent = m2.group("bytes")
             else:
-                dt_local = dt
-            time_parsed = dt_local
-            hour_bucket = dt_local.replace(microsecond=0)  # keep hh:mm:ss
-            date_bucket = dt_local.date()
-        else:
-            time_iso = "-"
-            time_parsed = None
-            hour_bucket = None
-            date_bucket = None
-        # ================================
+                quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
+                request = quoted[0].strip() if len(quoted) >= 1 else "-"
+                referer = quoted[1].strip() if len(quoted) >= 2 else "-"
+                ua = quoted[-1].strip() if len(quoted) >= 1 else "-"
+                m_status_bytes = re.search(r'\s(\d{3})\s+(-|\d+)', entry)
+                status = m_status_bytes.group(1) if m_status_bytes else "-"
+                bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
+                m_time = re.search(r'\[([^\]]+)\]', entry)
+                time_str = m_time.group(1) if m_time else "-"
 
-        status_class = f"{status[0]}xx" if status and status.isdigit() else "-"
-        parsed_url = urlparse(path) if path and path != "-" else None
-        path_clean = parsed_url.path if parsed_url and parsed_url.path else path
-        query_string = parsed_url.query if parsed_url else ""
-        query_params = dict(parse_qs(parsed_url.query)) if parsed_url and parsed_url.query else {}
-        is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', path, re.IGNORECASE))
-        is_mobile = bool(re.search(r'\b(Mobile|iPhone|Android)\b', ua, re.I))
-        section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
+        dt = parse_time_preserve_tz(time_str)
+        time_iso = dt.isoformat() if dt else "-"
+        method, path, http_ver = parse_request_field(request)
+        path_clean, query_str, query_params = safe_urlparse(path)
+        is_static = bool(STATIC_RE.search(path or ""))
+        status_class = f"{status[0]}xx" if status.isdigit() else "-"
+        section = path_clean.split('/')[1] if path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
+        bot_label = identify_bot_from_ua(ua) or "Others"
 
-        sid_base = f"{client_ip}|{ua}|{hour_bucket.isoformat() if hour_bucket else time_iso}"
-        session_id = hashlib.sha1(sid_base.encode('utf-8')).hexdigest()[:10]
-
-        bot_type = identify_bot(ua)
-        if bot_type == "Generic":
-            generic_bot_requests += 1
-            generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
-        elif bot_type == "LLM/AI":
-            llm_bot_requests += 1
-            llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
-        else:
-            others_requests += 1
-            others_uas[ua] = others_uas.get(ua, 0) + 1
-
-        hits.append({
+        return {
             "File": file_src,
             "LineNo": lineno,
             "ClientIP": client_ip,
             "Time": time_iso,
-            "Time_parsed": time_parsed,
-            "Date": str(date_bucket) if date_bucket else "-",
-            "HourBucket": hour_bucket.isoformat() if hour_bucket else "-",
+            "Time_parsed": dt,
             "Method": method,
             "Path": path,
             "PathClean": path_clean,
-            "Query": query_string,
+            "Query": query_str,
             "QueryParams": query_params,
             "Status": status,
             "StatusClass": status_class,
             "Bytes": bytes_sent,
             "Referer": referer,
             "User-Agent": ua,
-            "Bot Type": bot_type or "Others",
+            "BotType": bot_label,
             "IsStatic": is_static,
-            "IsMobile": is_mobile,
             "Section": section,
-            "SessionID": session_id,
-            "HTTP_Version": http_ver
-        })
+            "HTTP_Version": http_ver,
+            "RawEntry": entry,
+        }
+    except Exception:
+        return None
 
-    df_hits = pd.DataFrame(hits)
-    if "Time_parsed" in df_hits.columns:
-        df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time_parsed"], errors="coerce")
+def parse_log_stream(lines: Iterator[str]):
+    rows = []
+    diag = {"total": 0, "parsed": 0, "failed": 0, "samples": []}
+    buf = []
 
-    st.subheader("Key Metrics")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Requests", f"{total_requests:,}")
-    c2.metric("Bot (Generic)", f"{generic_bot_requests:,}")
-    c3.metric("Bot (LLM/AI)", f"{llm_bot_requests:,}")
-    c4.metric("Others", f"{others_requests:,}")
-    c5.metric("Unique IPs", f"{df_hits['ClientIP'].nunique():,}" if not df_hits.empty else "0")
+    def start_of_entry(ln):
+        if not ln:
+            return False
+        if START_INFO_RE.match(ln):
+            return True
+        if ln.startswith("[") and re.search(r'\d{1,2}/[A-Za-z]{3}/\d{4}', ln):
+            return True
+        if re.match(r'^\d', ln):
+            return True
+        return False
 
-    st.subheader("Traffic Composition")
-    df_comp = pd.DataFrame({
-        "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
-        "Count": [generic_bot_requests, llm_bot_requests, others_requests]
-    })
-    fig = px.pie(df_comp, names="Category", values="Count", title="Requests by Category")
-    st.plotly_chart(fig, use_container_width=True)
+    for ln in lines:
+        diag["total"] += 1
+        if start_of_entry(ln):
+            if buf:
+                entry = " ".join(buf).strip()
+                r = parse_single_entry(entry)
+                if r:
+                    rows.append(r)
+                    diag["parsed"] += 1
+                else:
+                    diag["failed"] += 1
+                    if len(diag["samples"]) < 5:
+                        diag["samples"].append(entry)
+                buf = [ln]
+            else:
+                buf = [ln]
+        else:
+            if buf:
+                buf.append(ln)
+            else:
+                entry = ln.strip()
+                r = parse_single_entry(entry)
+                if r:
+                    rows.append(r)
+                    diag["parsed"] += 1
+                else:
+                    diag["failed"] += 1
+                    if len(diag["samples"]) < 5:
+                        diag["samples"].append(entry)
 
-    st.subheader("Top Referers")
-    top_ref = df_hits["Referer"].replace("-", pd.NA).value_counts().reset_index().head(10)
-    top_ref.columns = ["Referer", "Count"]
-    st.dataframe(top_ref, use_container_width=True)
+    if buf:
+        entry = " ".join(buf).strip()
+        r = parse_single_entry(entry)
+        if r:
+            rows.append(r)
+            diag["parsed"] += 1
+        else:
+            diag["failed"] += 1
+            if len(diag["samples"]) < 5:
+                diag["samples"].append(entry)
 
-    st.subheader("Top IPs")
-    top_ips = df_hits["ClientIP"].replace("-", pd.NA).value_counts().reset_index().head(10)
-    top_ips.columns = ["ClientIP", "Count"]
-    st.dataframe(top_ips, use_container_width=True)
+    return rows, diag
 
-    st.subheader("Static vs Dynamic Requests")
-    static_counts = df_hits["IsStatic"].value_counts().rename_axis("IsStatic").reset_index(name="Count")
-    static_counts["Label"] = static_counts["IsStatic"].apply(lambda v: "Static" if v else "Dynamic")
-    fig2 = px.pie(static_counts, names="Label", values="Count", title="Static vs Dynamic")
-    st.plotly_chart(fig2, use_container_width=True)
+# =====================================================================
+# CACHED PARSE
+# =====================================================================
+@st.cache_data(show_spinner=False)
+def cached_parse(file_hash, b):
+    enc = detect_encoding_from_sample(b)
+    lines = text_line_iterator_from_bytes(b, encoding=enc)
+    rows, diag = parse_log_stream(lines)
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    return df, diag, enc
 
-    st.subheader("Detailed Hits (filtered view)")
-    if not df_hits.empty:
-        if df_hits["Time_parsed"].notna().any():
-            df_hits = df_hits.sort_values(by=["Time_parsed"], ascending=True)
-        df_display = df_hits.reset_index(drop=True)
-        st.dataframe(df_display, use_container_width=True)
-        csv_bytes = df_display.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Detailed CSV", csv_bytes, "detailed_hits.csv", "text/csv")
+# =====================================================================
+# UI
+# =====================================================================
+st.title("Bot-Focused Log Analyzer")
+uploaded_file = st.file_uploader("Upload log file (<=200 MB)", type=None)
+
+if uploaded_file:
+    b = uploaded_file.read()
+    h = compute_sha256_of_bytes(b)
+    df, diag, enc = cached_parse(h, b)
+
+    st.subheader("Parsing diagnostics")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total lines", diag.get("total", 0))
+    c2.metric("Parsed", diag.get("parsed", 0))
+    c3.metric("Failed", diag.get("failed", 0))
+    if diag.get("samples"):
+        for s in diag["samples"]:
+            st.code(s)
+
+    if df.empty:
+        st.warning("No parsed entries.")
     else:
-        st.info("No parsed hits.")
+        st.subheader("Bot Overview")
+        df["Time_parsed"] = pd.to_datetime(df["Time_parsed"], errors="coerce")
+        df["Hour"] = df["Time_parsed"].dt.hour.fillna(-1).astype(int)
+
+        bot_summary = df.groupby("BotType").agg(
+            Hits=("BotType", "size"),
+            UniqueIPs=("ClientIP", "nunique"),
+            FirstSeen=("Time_parsed", "min"),
+            LastSeen=("Time_parsed", "max"),
+        ).sort_values("Hits", ascending=False).reset_index()
+
+        st.dataframe(bot_summary, use_container_width=True)
+
+        st.subheader("Hourly distribution")
+        bot_sel = st.selectbox("Bot", bot_summary["BotType"].unique())
+        dfb = df[df["BotType"] == bot_sel]
+        hdist = dfb.groupby("Hour").size().reset_index(name="Count")
+        hdist = hdist.sort_values("Hour")
+        fig = px.bar(hdist, x="Hour", y="Count")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Status distribution")
+        sb = df.groupby(["BotType", "StatusClass"]).size().reset_index(name="Count")
+        fig2 = px.bar(sb, x="BotType", y="Count", color="StatusClass", barmode="stack")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        st.subheader("Top URLs for bot")
+        top_urls = dfb["PathClean"].value_counts().reset_index().head(20)
+        top_urls.columns = ["Path", "Hits"]
+        st.dataframe(top_urls, use_container_width=True)
+
+        st.subheader("User-Agent variants")
+        ua_var = dfb["User-Agent"].value_counts().reset_index().head(20)
+        ua_var.columns = ["User-Agent", "Count"]
+        st.dataframe(ua_var, use_container_width=True)
+
+        st.subheader("Bot IPs")
+        iptab = dfb["ClientIP"].value_counts().reset_index().head(50)
+        iptab.columns = ["IP", "Count"]
+        st.dataframe(iptab, use_container_width=True)
+
+        st.subheader("Bot Hit Log")
+        cols = ["Time", "ClientIP", "Method", "PathClean", "Status", "User-Agent"]
+        st.dataframe(dfb[cols].reset_index(drop=True), use_container_width=True)
+
+        st.subheader("Export")
+        csv = dfb.to_csv(index=False).encode()
+        st.download_button("Download bot CSV", csv, file_name=f"{bot_sel}.csv")
+
 else:
-    st.warning("Please upload a log file to begin analysis.")
+    st.info("Upload a log file to begin.")
