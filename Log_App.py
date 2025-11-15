@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -8,130 +9,65 @@ from datetime import datetime, timedelta, timezone
 from dateutil import parser as dtparser
 from urllib.parse import urlparse, parse_qs, unquote
 import plotly.express as px
-from typing import Iterator, Tuple, Optional, Dict, Any
+from typing import Iterator, Tuple, Optional, Dict, Any, Iterable
+import base64
 
 # =====================================================================
-# PAGE CONFIG
+# Page
 # =====================================================================
-st.set_page_config(page_title="Bot-Focused Log Analyzer", layout="wide")
+st.set_page_config(page_title="Bot-Focused Log Analyzer — Client Ready", layout="wide")
+st.title("Bot-Focused Log Analyzer — Client Ready")
 
 # =====================================================================
-# VERIFIED TOP BOT UA PATTERNS (no invention, no speculation)
+# Config: patterns and canonical mapping
 # =====================================================================
 VERIFIED_TOP_BOTS = [
-
-    # Search engine crawlers
-    r'\bGooglebot\b',
-    r'\bGooglebot-Image\b',
-    r'\bGooglebot-News\b',
-    r'\bGooglebot-Video\b',
-    r'\bGooglebot-Mobile\b',
-    r'\bGoogle-Extended\b',
-    r'\bBingbot\b',
-    r'\bBingPreview\b',
-    r'\bDuckDuckBot\b',
-    r'\bBaiduspider\b',
-    r'\bYandexBot\b',
-    r'\bYandexImages\b',
-    r'\bYisouSpider\b',
-    r'\bMojeekBot\b',
-    r'\bSogou web spider\b',
-    r'\b360Spider\b',
-    r'\bCoccocbot\b',
-    r'\bCoccocbot-web\b',
-    r'\bSemrushBot\b',
-
-    # AI search crawlers
-    r'\bPerplexityBot\b',
-    r'\bOAI-SearchBot\b',
-    r'\bClaude-SearchBot\b',
-    r'\bYouBot\b',
-    r'\bAddSearchBot\b',
-    r'\bAmazonbot\b',
-    r'\bPetalBot\b',
-
-    # AI data scrapers
-    r'\bGPTBot\b',
-    r'\bBytespider\b',
-    r'\bCCBot\b',
-    r'\bDiffbot\b',
-    r'\bomgili\b',
-    r'\bApplebot-Extended\b',
-    r'\bmeta-externalfetcher\b',
-    r'\bmeta-externalagent\b',
-    r'\bwebzio-extended\b',
-
-    # AI/LLM user-driven fetchers
-    r'\bChatGPT-User\b',
-    r'\bClaude-User\b',
-    r'\bClaudeBot\b',
-    r'\bPerplexity-User\b',
-    r'\bMistralAI-User\b',
-
-    # Enterprise / misc
-    r'\bAhrefsBot\b',
-    r'\bMJ12bot\b',
-    r'\bfacebookexternalhit\b',
-    r'\bSlackbot\b',
+    r'\bGooglebot\b', r'\bGooglebot-Image\b', r'\bGooglebot-News\b', r'\bGooglebot-Video\b',
+    r'\bGooglebot-Mobile\b', r'\bBingbot\b', r'\bBingPreview\b', r'\bDuckDuckBot\b',
+    r'\bBaiduspider\b', r'\bYandexBot\b', r'\bSemrushBot\b', r'\bPerplexityBot\b',
+    r'\bGPTBot\b', r'\bChatGPT-User\b', r'\bClaude-User\b', r'\bClaudeBot\b',
+    r'\bGPTBot\b', r'\bBytespider\b', r'\bCCBot\b', r'\bDiffbot\b',
+    r'\bAhrefsBot\b', r'\bMJ12bot\b', r'\bfacebookexternalhit\b', r'\bSlackbot\b',
     r'\bTwitterbot\b',
 ]
-
-# Placeholders for extension
-CUSTOM_TOP50_EXTENSIONS = [
-    # Add additional UA tokens exactly as they appear in real logs.
-]
-
-ALL_BOT_PATTERNS = VERIFIED_TOP_BOTS + CUSTOM_TOP50_EXTENSIONS
-
 AI_LLM_BOT_PATTERNS = [
-    r'\bGPTBot\b',
-    r'\bChatGPT-User\b',
-    r'\bOAI-SearchBot\b',
-    r'\bClaude-User\b',
-    r'\bClaudeBot\b',
-    r'\bClaude-SearchBot\b',
-    r'\bPerplexityBot\b',
-    r'\bPerplexity-User\b',
-    r'\bMistralAI-User\b',
-    r'\bBytespider\b',
-    r'\bCCBot\b',
-    r'\bDiffbot\b',
-    r'\bomgili\b',
-    r'\bApplebot-Extended\b',
-    r'\bmeta-externalagent\b',
-    r'\bmeta-externalfetcher\b',
+    r'\bGPTBot\b', r'\bChatGPT-User\b', r'\bPerplexityBot\b', r'\bClaude-User\b', r'\bClaudeBot\b'
+]
+AI_LLM_BOT_RE = re.compile("|".join(AI_LLM_BOT_PATTERNS), re.I)
+GENERIC_BOT_RE = re.compile("|".join([p for p in VERIFIED_TOP_BOTS if p not in AI_LLM_BOT_PATTERNS]), re.I)
+
+BOT_CANONICAL = [
+    (r'\bGooglebot\b', "Googlebot"),
+    (r'\bGooglebot-Image\b', "Googlebot-Image"),
+    (r'\bBingbot\b', "Bingbot"),
+    (r'\bGPTBot\b', "GPTBot (OpenAI)"),
+    (r'\bChatGPT-User\b', "ChatGPT-User (OpenAI)"),
+    (r'\bPerplexityBot\b', "PerplexityBot"),
+    (r'\bClaude-User\b', "Claude-User"),
+    (r'\bAhrefsBot\b', "AhrefsBot"),
+    (r'\bSlackbot\b', "Slackbot"),
+    (r'\bTwitterbot\b', "Twitterbot"),
 ]
 
-GENERIC_BOT_PATTERNS = [p for p in ALL_BOT_PATTERNS if p not in AI_LLM_BOT_PATTERNS]
-
-AI_LLM_BOT_RE = re.compile("|".join(AI_LLM_BOT_PATTERNS), re.I)
-GENERIC_BOT_RE = re.compile("|".join(GENERIC_BOT_PATTERNS), re.I)
-
 # =====================================================================
-# REGEXES AND CONSTANTS
+# Regex constants
 # =====================================================================
-START_INFO_RE = re.compile(
-    r'^(?:(?P<file>[^:\s]+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s'
-)
-
+START_INFO_RE = re.compile(r'^(?:(?P<file>[^:\s]+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
 COMBINED_LOG_RE = re.compile(
     r'(?P<remote>\S+)\s+(?P<ident>\S+)\s+(?P<authuser>\S+)\s+\[(?P<time>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+(?P<status>\d{3}|-)\s+(?P<bytes>\d+|-)\s+"(?P<referer>[^"]*)"\s+"(?P<ua>[^"]*)"',
     flags=re.DOTALL,
 )
-
 COMMON_LOG_RE = re.compile(
     r'(?P<remote>\S+)\s+(?P<ident>\S+)\s+(?P<authuser>\S+)\s+\[(?P<time>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+(?P<status>\d{3}|-)\s+(?P<bytes>\d+|-)',
     flags=re.DOTALL,
 )
-
 STATIC_RE = re.compile(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', re.I)
 
-SESSION_TIMEOUT_MINUTES = 30
-
 # =====================================================================
-# UTILITY FUNCTIONS
+# Utilities
 # =====================================================================
 def compute_sha256_of_bytes(b: bytes) -> str:
+    import hashlib
     h = hashlib.sha256()
     h.update(b)
     return h.hexdigest()
@@ -145,14 +81,6 @@ def detect_encoding_from_sample(b: bytes, sample_size: int = 65536) -> str:
         except Exception:
             continue
     return "utf-8"
-
-def text_line_iterator_from_bytes(b: bytes, encoding: Optional[str] = None) -> Iterator[str]:
-    if encoding is None:
-        encoding = detect_encoding_from_sample(b)
-    bio = io.BytesIO(b)
-    reader = codecs.getreader(encoding)(bio, errors="replace")
-    for line in reader:
-        yield line.rstrip("\n").rstrip("\r")
 
 def parse_time_preserve_tz(ts: str) -> Optional[datetime]:
     if not ts or ts.strip() == "-":
@@ -187,15 +115,6 @@ def safe_urlparse(path: str):
     except Exception:
         return path, "", {}
 
-def anonymize_ip(ip: str, salt: str):
-    if not ip or ip == "-":
-        return ip
-    h = hashlib.sha256((salt + "|" + ip).encode()).hexdigest()
-    return h[:16]
-
-# =====================================================================
-# BOT IDENTIFICATION
-# =====================================================================
 def identify_bot_from_ua(ua: str) -> Optional[str]:
     if not ua or ua.strip() == "-":
         return None
@@ -205,14 +124,43 @@ def identify_bot_from_ua(ua: str) -> Optional[str]:
         return "GenericBot"
     return None
 
+def canonicalize_ua(ua: str) -> Tuple[str,str]:
+    """
+    Return (canonical_name, group) where group one of: Google, Bing, AI/LLM, Generic, Others
+    """
+    if not ua or ua.strip() == "-":
+        return ("-", "Others")
+    for pat, name in BOT_CANONICAL:
+        if re.search(pat, ua, re.I):
+            if "Google" in name:
+                return (name, "Google")
+            if "Bing" in name:
+                return (name, "Bing")
+            if re.search("|".join([p for p,_ in BOT_CANONICAL]), name, re.I) and AI_LLM_BOT_RE.search(ua):
+                return (name, "AI/LLM")
+            # fallback mapping
+            if AI_LLM_BOT_RE.search(ua):
+                return (name, "AI/LLM")
+            return (name, "Generic")
+    # heuristics
+    if re.search(r'google', ua, re.I):
+        return ("Unknown Google UA", "Google")
+    if re.search(r'bing', ua, re.I):
+        return ("Unknown Bing UA", "Bing")
+    if AI_LLM_BOT_RE.search(ua):
+        return ("Unknown AI/LLM", "AI/LLM")
+    if GENERIC_BOT_RE.search(ua):
+        return ("Unknown Generic", "Generic")
+    return (ua[:80], "Others")
+
 # =====================================================================
-# PARSING
+# Parsing (streaming-friendly)
 # =====================================================================
 def parse_single_entry(entry: str) -> Optional[dict]:
     try:
         m_start = START_INFO_RE.match(entry)
         file_src = m_start.group("file") if m_start and m_start.group("file") else "-"
-        lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else "-"
+        lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else ""
         client_ip = m_start.group("ip") if m_start else "-"
 
         m = COMBINED_LOG_RE.search(entry)
@@ -249,8 +197,8 @@ def parse_single_entry(entry: str) -> Optional[dict]:
         path_clean, query_str, query_params = safe_urlparse(path)
         is_static = bool(STATIC_RE.search(path or ""))
         status_class = f"{status[0]}xx" if status.isdigit() else "-"
-        section = path_clean.split('/')[1] if path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
-        bot_label = identify_bot_from_ua(ua) or "Others"
+        section = path_clean.split('/')[1] if path_clean.startswith('/') and len(path_clean.split('/')) > 1 else ""
+        canonical_name, bot_group = canonicalize_ua(ua)
 
         return {
             "File": file_src,
@@ -268,7 +216,8 @@ def parse_single_entry(entry: str) -> Optional[dict]:
             "Bytes": bytes_sent,
             "Referer": referer,
             "User-Agent": ua,
-            "BotType": bot_label,
+            "BotCanonical": canonical_name,
+            "BotGroup": bot_group,
             "IsStatic": is_static,
             "Section": section,
             "HTTP_Version": http_ver,
@@ -277,11 +226,29 @@ def parse_single_entry(entry: str) -> Optional[dict]:
     except Exception:
         return None
 
-def parse_log_stream(lines: Iterator[str]):
-    rows = []
-    diag = {"total": 0, "parsed": 0, "failed": 0, "samples": []}
-    buf = []
+def stream_lines_from_uploaded(uploaded_file) -> Iterator[str]:
+    """
+    Read small sample to detect encoding, then yield lines without loading entire file.
+    """
+    # uploaded_file: stream-like. read small sample
+    pos = uploaded_file.tell() if hasattr(uploaded_file, "tell") else None
+    sample = uploaded_file.read(65536)
+    enc = detect_encoding_from_sample(sample if isinstance(sample, bytes) else sample.encode('utf-8', errors='replace'))
+    # rewind
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    # wrap with TextIOWrapper
+    textio = io.TextIOWrapper(uploaded_file, encoding=enc, errors='replace', newline=None)
+    for line in textio:
+        yield line.rstrip("\n").rstrip("\r")
 
+def parse_streaming_to_dfs(lines: Iterable[str], batch_size: int = 5000):
+    """
+    Parse incoming lines into DataFrame batches; yields DataFrames.
+    Handles multi-line log entries using start_of_entry heuristic.
+    """
     def start_of_entry(ln):
         if not ln:
             return False
@@ -293,19 +260,18 @@ def parse_log_stream(lines: Iterator[str]):
             return True
         return False
 
+    buf = []
+    parsed_batch = []
     for ln in lines:
-        diag["total"] += 1
         if start_of_entry(ln):
             if buf:
                 entry = " ".join(buf).strip()
                 r = parse_single_entry(entry)
                 if r:
-                    rows.append(r)
-                    diag["parsed"] += 1
-                else:
-                    diag["failed"] += 1
-                    if len(diag["samples"]) < 5:
-                        diag["samples"].append(entry)
+                    parsed_batch.append(r)
+                    if len(parsed_batch) >= batch_size:
+                        yield pd.DataFrame.from_records(parsed_batch)
+                        parsed_batch = []
                 buf = [ln]
             else:
                 buf = [ln]
@@ -316,108 +282,188 @@ def parse_log_stream(lines: Iterator[str]):
                 entry = ln.strip()
                 r = parse_single_entry(entry)
                 if r:
-                    rows.append(r)
-                    diag["parsed"] += 1
-                else:
-                    diag["failed"] += 1
-                    if len(diag["samples"]) < 5:
-                        diag["samples"].append(entry)
-
+                    parsed_batch.append(r)
+                    if len(parsed_batch) >= batch_size:
+                        yield pd.DataFrame.from_records(parsed_batch)
+                        parsed_batch = []
     if buf:
         entry = " ".join(buf).strip()
         r = parse_single_entry(entry)
         if r:
-            rows.append(r)
-            diag["parsed"] += 1
-        else:
-            diag["failed"] += 1
-            if len(diag["samples"]) < 5:
-                diag["samples"].append(entry)
-
-    return rows, diag
+            parsed_batch.append(r)
+    if parsed_batch:
+        yield pd.DataFrame.from_records(parsed_batch)
 
 # =====================================================================
-# CACHED PARSE
+# UI: upload and parsing controls
 # =====================================================================
-@st.cache_data(show_spinner=False)
-def cached_parse(file_hash, b):
-    enc = detect_encoding_from_sample(b)
-    lines = text_line_iterator_from_bytes(b, encoding=enc)
-    rows, diag = parse_log_stream(lines)
-    df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    return df, diag, enc
-
-# =====================================================================
-# UI
-# =====================================================================
-st.title("Bot-Focused Log Analyzer")
-uploaded_file = st.file_uploader("Upload log file (<=200 MB)", type=None)
+st.sidebar.header("Upload / Controls")
+uploaded_file = st.sidebar.file_uploader("Upload per-bot log file (one bot per file recommended)", type=None, help="Large per-bot files supported via streaming.")
+sample_rows = st.sidebar.number_input("Preview rows in table", min_value=5, max_value=1000, value=25)
 
 if uploaded_file:
-    b = uploaded_file.read()
-    h = compute_sha256_of_bytes(b)
-    df, diag, enc = cached_parse(h, b)
+    # use streaming parse and incremental aggregation
+    placeholder = st.empty()
+    progress = st.sidebar.progress(0)
+    status_text = st.sidebar.empty()
 
-    st.subheader("Parsing diagnostics")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total lines", diag.get("total", 0))
-    c2.metric("Parsed", diag.get("parsed", 0))
-    c3.metric("Failed", diag.get("failed", 0))
-    if diag.get("samples"):
-        for s in diag["samples"]:
-            st.code(s)
+    # compute SHA from a small sample to use caching key
+    try:
+        # some stream objects support getbuffer()/read; for robust, read small sample as bytes
+        uploaded_file.seek(0)
+        sample_bytes = uploaded_file.read(65536)
+        file_hash = compute_sha256_of_bytes(sample_bytes)
+        uploaded_file.seek(0)
+    except Exception:
+        file_hash = str(hash(uploaded_file))
 
-    if df.empty:
-        st.warning("No parsed entries.")
+    # parse in batches
+    dfs = []
+    total_rows = 0
+    batch_count = 0
+    try:
+        lines = stream_lines_from_uploaded(uploaded_file)
+        for i, df_batch in enumerate(parse_streaming_to_dfs(lines, batch_size=4000)):
+            batch_count += 1
+            total_rows += len(df_batch)
+            dfs.append(df_batch)
+            progress.progress(min(100, int((i+1) % 100)))
+            status_text.write(f"Parsed batches: {batch_count}, rows so far: {total_rows}")
+        progress.progress(100)
+    except Exception as e:
+        st.error(f"Parsing failed: {e}")
+        raise
+
+    if not dfs:
+        st.warning("No parseable entries found.")
+        st.stop()
+
+    # concat with memory-sensible dtypes
+    df = pd.concat(dfs, ignore_index=True)
+    # basic normalization
+    df['Time_parsed'] = pd.to_datetime(df['Time_parsed'], errors='coerce')
+    # reduce memory
+    for col in ['BotGroup','StatusClass','Section']:
+        if col in df.columns:
+            df[col] = df[col].astype('category')
+    st.sidebar.success(f"Parsed {len(df)} rows; batches: {len(dfs)}")
+
+    # =================================================================
+    # Executive summary cards
+    # =================================================================
+    st.subheader("Executive summary")
+    total_hits = len(df)
+    unique_pages = df['PathClean'].nunique()
+    unique_ips = df['ClientIP'].nunique()
+    pct_success = round(((df['Status'].astype(str).str.startswith('2') | df['Status'].astype(str).str.startswith('3')).sum() / total_hits) * 100, 1) if total_hits else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total bot hits", total_hits)
+    c2.metric("Unique pages crawled", unique_pages)
+    c3.metric("Unique bot IPs", unique_ips)
+    c4.metric("% 2xx/3xx responses", f"{pct_success}%")
+
+    # top bot groups
+    st.markdown("**Bot groups**")
+    bot_group_counts = df['BotGroup'].value_counts().reset_index()
+    bot_group_counts.columns = ['BotGroup', 'Hits']
+    st.dataframe(bot_group_counts, use_container_width=True, height=200)
+
+    # =================================================================
+    # Filters (left pane)
+    # =================================================================
+    st.sidebar.header("Filters")
+    bot_choice = st.sidebar.multiselect("Bot group", options=df['BotGroup'].cat.categories.tolist() if 'BotGroup' in df.columns else df['BotGroup'].unique().tolist(), default=None)
+    status_filter = st.sidebar.multiselect("Status class", options=df['StatusClass'].dropna().unique().tolist(), default=None)
+    section_filter = st.sidebar.text_input("Include section (regex)", value="")
+    only_dynamic = st.sidebar.checkbox("Only dynamic content (exclude static assets)", value=True)
+
+    dff = df.copy()
+    if bot_choice:
+        dff = dff[dff['BotGroup'].isin(bot_choice)]
+    if status_filter:
+        dff = dff[dff['StatusClass'].isin(status_filter)]
+    if section_filter:
+        try:
+            dff = dff[dff['Section'].str.contains(section_filter, na=False, regex=True)]
+        except Exception:
+            pass
+    if only_dynamic:
+        dff = dff[~dff['IsStatic']]
+
+    if dff.empty:
+        st.warning("No rows match filters.")
+        st.stop()
+
+    # =================================================================
+    # Chart 1: hourly time series by BotCanonical or BotGroup
+    # =================================================================
+    st.subheader("Hourly distribution (time series)")
+    # choose grouping: BotGroup or BotCanonical if multiple
+    group_by = st.selectbox("Group by", ["BotGroup", "BotCanonical"])
+    tmp = dff.copy()
+    tmp['DateHour'] = tmp['Time_parsed'].dt.floor('H')
+    agg = tmp.groupby(['DateHour', group_by]).size().reset_index(name='Count')
+    if agg.empty:
+        st.info("No time-series data available for selected filters.")
     else:
-        st.subheader("Bot Overview")
-        df["Time_parsed"] = pd.to_datetime(df["Time_parsed"], errors="coerce")
-        df["Hour"] = df["Time_parsed"].dt.hour.fillna(-1).astype(int)
-
-        bot_summary = df.groupby("BotType").agg(
-            Hits=("BotType", "size"),
-            UniqueIPs=("ClientIP", "nunique"),
-            FirstSeen=("Time_parsed", "min"),
-            LastSeen=("Time_parsed", "max"),
-        ).sort_values("Hits", ascending=False).reset_index()
-
-        st.dataframe(bot_summary, use_container_width=True)
-
-        st.subheader("Hourly distribution")
-        bot_sel = st.selectbox("Bot", bot_summary["BotType"].unique())
-        dfb = df[df["BotType"] == bot_sel]
-        hdist = dfb.groupby("Hour").size().reset_index(name="Count")
-        hdist = hdist.sort_values("Hour")
-        fig = px.bar(hdist, x="Hour", y="Count")
+        fig = px.area(agg, x='DateHour', y='Count', color=group_by, line_group=group_by, title="Bot hits over time")
         st.plotly_chart(fig, use_container_width=True)
+        # Export PNG if kaleido available
+        try:
+            img_bytes = fig.to_image(format="png")
+            st.download_button("Download time series PNG", img_bytes, file_name="time_series.png", mime="image/png")
+        except Exception:
+            st.info("PNG export not available in this environment (kaleido). Chart download suppressed.")
 
-        st.subheader("Status distribution")
-        sb = df.groupby(["BotType", "StatusClass"]).size().reset_index(name="Count")
-        fig2 = px.bar(sb, x="BotType", y="Count", color="StatusClass", barmode="stack")
+    # =================================================================
+    # Chart 2: Top URLs for selected bot/filter
+    # =================================================================
+    st.subheader("Top URLs (by hits)")
+    top_n = st.slider("Top N", min_value=5, max_value=200, value=20)
+    top_urls = dff['PathClean'].value_counts().reset_index().head(top_n)
+    top_urls.columns = ["Path", "Hits"]
+    st.dataframe(top_urls, use_container_width=True)
+
+    # small bar chart
+    if not top_urls.empty:
+        fig2 = px.bar(top_urls.sort_values("Hits"), x="Hits", y="Path", orientation='h', title=f"Top {top_n} URLs")
         st.plotly_chart(fig2, use_container_width=True)
+        try:
+            img_bytes2 = fig2.to_image(format="png")
+            st.download_button("Download top URLs PNG", img_bytes2, file_name="top_urls.png", mime="image/png")
+        except Exception:
+            pass
 
-        st.subheader("Top URLs for bot")
-        top_urls = dfb["PathClean"].value_counts().reset_index().head(20)
-        top_urls.columns = ["Path", "Hits"]
-        st.dataframe(top_urls, use_container_width=True)
+    # =================================================================
+    # UA variants and IP table
+    # =================================================================
+    st.subheader("UA variants (top)")
+    ua_tab = dff['User-Agent'].value_counts().reset_index().head(50)
+    ua_tab.columns = ["User-Agent", "Count"]
+    st.dataframe(ua_tab, use_container_width=True)
 
-        st.subheader("User-Agent variants")
-        ua_var = dfb["User-Agent"].value_counts().reset_index().head(20)
-        ua_var.columns = ["User-Agent", "Count"]
-        st.dataframe(ua_var, use_container_width=True)
+    st.subheader("Bot IPs (top)")
+    ip_tab = dff['ClientIP'].value_counts().reset_index().head(200)
+    ip_tab.columns = ["IP", "Count"]
+    st.dataframe(ip_tab, use_container_width=True)
 
-        st.subheader("Bot IPs")
-        iptab = dfb["ClientIP"].value_counts().reset_index().head(50)
-        iptab.columns = ["IP", "Count"]
-        st.dataframe(iptab, use_container_width=True)
+    # =================================================================
+    # Export CSV / data
+    # =================================================================
+    st.subheader("Export")
+    csv_bytes = dff.to_csv(index=False).encode('utf-8')
+    st.download_button("Download filtered CSV", csv_bytes, file_name="bot_filtered.csv", mime="text/csv")
 
-        st.subheader("Bot Hit Log")
-        cols = ["Time", "ClientIP", "Method", "PathClean", "Status", "User-Agent"]
-        st.dataframe(dfb[cols].reset_index(drop=True), use_container_width=True)
-
-        st.subheader("Export")
-        csv = dfb.to_csv(index=False).encode()
-        st.download_button("Download bot CSV", csv, file_name=f"{bot_sel}.csv")
+    # small report text
+    findings = f"""Findings:
+Total hits: {total_hits}
+Unique pages: {unique_pages}
+Unique IPs: {unique_ips}
+% success (2xx/3xx): {pct_success}%
+Top bot groups:\n{bot_group_counts.head(10).to_string(index=False)}
+"""
+    st.text_area("Auto-generated findings (editable)", value=findings, height=160)
 
 else:
-    st.info("Upload a log file to begin.")
+    st.info("Upload a per-bot log file in the sidebar to begin parsing. App parses in-stream and provides batch outputs without loading the entire file into memory.")
