@@ -13,18 +13,18 @@ import string
 # -------------------------
 # Page config
 # -------------------------
-st.set_page_config(page_title="Bot-Focused Log Analyzer — SEO Actionables", layout="wide")
+st.set_page_config(page_title="SFLA — Screaming-Frog-like Log Analyzer", layout="wide")
 st.markdown("""
 <style>
-  body {background-color:#0f1117;color:#e8e8e8}
-  .block-container{padding-top:1rem;}
+  body {background:#0f1117;color:#e8e8e8}
+  .block-container{padding-top:1rem}
   .stDownloadButton>button{background:#0b84ff}
 </style>
 """, unsafe_allow_html=True)
-st.title("Bot-Focused Log Analyzer — SEO Actionables")
+st.title("SFLA — Screaming-Frog-style Log Analyzer (Bot & SEO)")
 
 # -------------------------
-# Utilities: encoding detection
+# Encoding detection (heuristic)
 # -------------------------
 def score_decoding(b: bytes, enc: str) -> float:
     try:
@@ -46,38 +46,34 @@ def detect_best_encoding(sample: bytes, candidates=("utf-8","utf-16","latin-1","
     return best or "utf-8"
 
 # -------------------------
-# UA cleaning & dynamic detection (no fixed list required)
+# UA cleaning and dynamic detection
 # -------------------------
-# small canonical map for common well-known tokens (keeps UI tidy but is optional)
 CANONICAL_UA_PATTERNS = [
     (r'chatgpt-user', 'ChatGPT-User/1.0'),
     (r'gptbot', 'GPTBot/1.0'),
     (r'googlebot', 'Googlebot/2.1'),
     (r'bingbot', 'Bingbot/2.0'),
-    (r'perplexitybot', 'PerplexityBot/1.0'),
-    (r'claude', 'ClaudeBot/1.0'),
 ]
 
-BOT_SIGNALS = [r'bot', r'spider', r'crawler', r'fetch', r'scrap', r'preview', r'probe', r'index', r'validator', r'httpclient', r'curl', r'wget', r'python-requests']
-AI_SIGNALS = [r'\bai\b', r'\bml\b', r'-user\b', r'-agent\b', r'assistant', r'language-model']
+BOT_SIGNALS = [r'bot', r'spider', r'crawler', r'fetch', r'scrap', r'preview', r'probe', r'index', r'validator', r'curl', r'wget']
+AI_SIGNALS = [r'\bai\b', r'\bml\b', r'-user\b', r'-agent\b', r'assistant']
 
 def clean_ua(raw: str) -> str:
     if not raw:
         return "-"
-    # strip nonprintables and collapse whitespace
     s = "".join(ch if ch.isprintable() else " " for ch in raw)
     s = re.sub(r'\s+', ' ', s).strip()
     return s or "-"
 
-def canonicalize_ua(cleaned_ua: str) -> str:
-    low = cleaned_ua.lower()
+def canonicalize_ua(cleaned: str) -> str:
+    low = (cleaned or "").lower()
     for pat, canon in CANONICAL_UA_PATTERNS:
         if re.search(pat, low):
             return canon
-    return cleaned_ua  # fallback, dynamic
+    return cleaned
 
-def detect_group_from_ua(cleaned_ua: str) -> str:
-    low = cleaned_ua.lower()
+def detect_group(cleaned: str) -> str:
+    low = (cleaned or "").lower()
     for p in AI_SIGNALS:
         if re.search(p, low):
             return "AI/LLM"
@@ -87,7 +83,7 @@ def detect_group_from_ua(cleaned_ua: str) -> str:
     return "Other"
 
 # -------------------------
-# Request extraction (strict + relaxed)
+# Request extraction
 # -------------------------
 REQ_STRICT = re.compile(r'"(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH)\s+([^\s"]+)(?:\s+HTTP/\d\.\d)?"', re.I)
 REQ_RELAX = re.compile(r'(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH)\s+(/[^ \t\n\r"]+)', re.I)
@@ -119,7 +115,7 @@ def parse_time_token(ts: str):
                 return None
 
 # -------------------------
-# Start-of-entry detection (supports file:lineno:ip and plain ip)
+# Start detection (filename:lineno:IP or IP)
 # -------------------------
 START_INFO_RE = re.compile(r'^(?:(?P<file>[^:\s]+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
 
@@ -133,60 +129,53 @@ def start_of_entry(line: str) -> bool:
     return False
 
 # -------------------------
-# Streaming read util (choose encoding by sample)
+# Streaming reader
 # -------------------------
-def stream_lines_from_uploaded(uploaded_file):
+def stream_lines_from_uploaded(f):
     try:
-        uploaded_file.seek(0)
+        f.seek(0)
     except Exception:
         pass
-    sample = uploaded_file.read(65536)
-    if isinstance(sample, str):
-        sample_bytes = sample.encode('utf-8', errors='replace')
-    else:
-        sample_bytes = sample or b''
+    sample = f.read(65536)
+    sample_bytes = sample.encode('utf-8', errors='replace') if isinstance(sample, str) else (sample or b'')
     enc = detect_best_encoding(sample_bytes)
     try:
-        uploaded_file.seek(0)
+        f.seek(0)
     except Exception:
         pass
     try:
-        wrapper = io.TextIOWrapper(uploaded_file, encoding=enc, errors="replace")
+        wrapper = io.TextIOWrapper(f, encoding=enc, errors='replace')
         for line in wrapper:
             yield line.rstrip('\n').rstrip('\r')
     except Exception:
-        # fallback: read all and split
-        uploaded_file.seek(0)
-        allb = uploaded_file.read()
-        if isinstance(allb, bytes):
-            text = allb.decode(enc, errors='replace')
-        else:
-            text = str(allb)
+        f.seek(0)
+        allb = f.read()
+        text = allb.decode(enc, errors='replace') if isinstance(allb, bytes) else str(allb)
         for line in text.splitlines():
             yield line.rstrip('\n').rstrip('\r')
 
 # -------------------------
-# Parse single entry (after reconstruction)
+# Parse single entry
 # -------------------------
-def parse_single_entry(entry: str) -> dict:
+def parse_single_entry(entry: str):
     m_start = START_INFO_RE.match(entry)
     file_src = m_start.group('file') if m_start and m_start.group('file') else "-"
     lineno = m_start.group('lineno') if m_start and m_start.group('lineno') else "-"
     client_ip = m_start.group('ip') if m_start and m_start.group('ip') else "-"
 
     m_time = re.search(r'\[([^\]]+)\]', entry)
-    time_token = m_time.group(1) if m_time else "-"
-    dt = parse_time_token(time_token)
+    time_tok = m_time.group(1) if m_time else "-"
+    dt = parse_time_token(time_tok)
 
     method, path = extract_request(entry)
     path_clean = "-"
-    query_string = ""
+    query = ""
     query_params = {}
     if path and path != "-":
         try:
             p = urlparse(unquote(path))
             path_clean = p.path or path
-            query_string = p.query or ""
+            query = p.query or ""
             query_params = dict(parse_qs(p.query)) if p.query else {}
         except Exception:
             path_clean = path
@@ -198,43 +187,42 @@ def parse_single_entry(entry: str) -> dict:
     quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
     referer = quoted[1].strip() if len(quoted) >= 2 else "-"
     ua_raw = quoted[-1].strip() if quoted else "-"
-    ua_cleaned = clean_ua(ua_raw)
-    ua_canonical = canonicalize_ua(ua_cleaned)
-    ua_group = detect_group_from_ua(ua_cleaned)
+    ua_clean = clean_ua(ua_raw)
+    ua_canon = canonicalize_ua(ua_clean)
+    ua_group = detect_group(ua_clean)
 
     is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)(?:$|\?)', path_clean, re.I))
     section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
 
     hour_bucket = dt.replace(minute=0, second=0, microsecond=0) if dt else None
-    sid_base = f"{client_ip}|{ua_cleaned}|{hour_bucket.isoformat() if hour_bucket else time_token}"
-    session_id = hashlib.sha1(sid_base.encode('utf-8')).hexdigest()[:12]
+    sid = hashlib.sha1(f"{client_ip}|{ua_clean}|{hour_bucket.isoformat() if hour_bucket else time_tok}".encode()).hexdigest()[:12]
 
     return {
         "File": file_src,
         "LineNo": lineno,
         "ClientIP": client_ip,
         "Time": dt,
-        "Time_raw": time_token,
+        "Time_raw": time_tok,
         "Method": method,
         "Path": path,
         "PathClean": path_clean,
-        "Query": query_string,
+        "Query": query,
         "QueryParams": query_params,
         "Status": status,
         "Bytes": bytes_sent,
         "Referer": referer,
         "User-Agent-Raw": ua_raw,
-        "User-Agent": ua_canonical,
-        "User-Agent-Clean": ua_cleaned,
+        "User-Agent": ua_canon,
+        "User-Agent-Clean": ua_clean,
         "UA-Group": ua_group,
         "IsStatic": is_static,
         "Section": section,
-        "SessionID": session_id,
+        "SessionID": sid,
         "RawEntry": entry
     }
 
 # -------------------------
-# Parse a stream into reconstructed entries
+# Parse log stream (reconstruct multi-line)
 # -------------------------
 def parse_log_stream(lines):
     rows = []
@@ -244,15 +232,15 @@ def parse_log_stream(lines):
         diag["total"] += 1
         if start_of_entry(ln):
             if buf:
-                entry = " ".join(buf).strip()
+                ent = " ".join(buf).strip()
                 try:
-                    r = parse_single_entry(entry)
+                    r = parse_single_entry(ent)
                     rows.append(r)
                     diag["parsed"] += 1
                 except Exception:
                     diag["failed"] += 1
                     if len(diag["samples"]) < 5:
-                        diag["samples"].append(entry)
+                        diag["samples"].append(ent)
                 buf = [ln]
             else:
                 buf = [ln]
@@ -260,58 +248,53 @@ def parse_log_stream(lines):
             if buf:
                 buf.append(ln)
             else:
-                # orphan line
-                entry = ln.strip()
+                ent = ln.strip()
                 try:
-                    r = parse_single_entry(entry)
+                    r = parse_single_entry(ent)
                     rows.append(r)
                     diag["parsed"] += 1
                 except Exception:
                     diag["failed"] += 1
                     if len(diag["samples"]) < 5:
-                        diag["samples"].append(entry)
+                        diag["samples"].append(ent)
     if buf:
-        entry = " ".join(buf).strip()
+        ent = " ".join(buf).strip()
         try:
-            r = parse_single_entry(entry)
+            r = parse_single_entry(ent)
             rows.append(r)
             diag["parsed"] += 1
         except Exception:
             diag["failed"] += 1
             if len(diag["samples"]) < 5:
-                diag["samples"].append(entry)
+                diag["samples"].append(ent)
     return rows, diag
 
 # -------------------------
-# UI Controls
+# UI controls
 # -------------------------
 st.sidebar.header("Upload / Options")
 uploaded = st.sidebar.file_uploader("Upload per-bot log file (one bot per file recommended)", type=None)
-top_n = st.sidebar.slider("Top N URLs", min_value=5, max_value=200, value=20)
-exclude_dash = st.sidebar.checkbox("Exclude unknown '-' paths from top URLs", value=True)
-only_dynamic = st.sidebar.checkbox("Only dynamic (exclude static) in charts", value=False)
-show_failed = st.sidebar.checkbox("Show parse-failed samples", value=True)
-
 if not uploaded:
-    st.info("Upload a log file (per-bot split) to begin.")
+    st.info("Upload a per-bot log file (example: access239.log:... lines).")
     st.stop()
+
+top_n = st.sidebar.slider("Top N", 5, 200, 20)
+exclude_dash = st.sidebar.checkbox("Exclude unknown '-' paths from top lists", value=True)
+only_dynamic = st.sidebar.checkbox("Exclude static assets in charts", value=False)
+show_failed = st.sidebar.checkbox("Show parse-failed samples", value=True)
 
 # -------------------------
 # Parse file
 # -------------------------
-with st.spinner("Detecting encoding and parsing..."):
-    # detect encoding for display in diagnostics
+with st.spinner("Detecting encoding & parsing..."):
     try:
         uploaded.seek(0)
-        sample = uploaded.read(65536)
-        if isinstance(sample, str):
-            sample_bytes = sample.encode('utf-8', errors='replace')
-        else:
-            sample_bytes = sample or b''
-        chosen_enc = detect_best_encoding(sample_bytes)
     except Exception:
-        chosen_enc = "utf-8"
-    # rewind and parse streaming
+        pass
+    # detect encoding for diagnostics
+    sample = uploaded.read(65536)
+    sample_bytes = sample.encode('utf-8', errors='replace') if isinstance(sample, str) else (sample or b'')
+    chosen_enc = detect_best_encoding(sample_bytes)
     try:
         uploaded.seek(0)
     except Exception:
@@ -329,164 +312,176 @@ st.subheader("Parsing diagnostics")
 c1, c2, c3 = st.columns(3)
 c1.metric("Lines processed", f"{diag.get('total',0):,}")
 c2.metric("Parsed entries", f"{diag.get('parsed',0):,}")
-c3.metric("Failed samples", f"{diag.get('failed',0):,}")
-st.markdown(f"**Encoding chosen (heuristic):** `{chosen_enc}`")
+c3.metric("Failed parsings", f"{diag.get('failed',0):,}")
+st.markdown(f"**Encoding (heuristic):** `{chosen_enc}`")
 if show_failed and diag.get("samples"):
-    st.markdown("**Sample failed entries**")
+    st.markdown("Sample failed entries")
     for s in diag["samples"]:
         st.code(s)
 
 # -------------------------
-# Executive KPIs
+# Overview KPIs (Screaming Frog style)
 # -------------------------
 total_hits = len(df)
-unique_paths = df["PathClean"].nunique(dropna=True)
+unique_urls = df["PathClean"].nunique(dropna=True)
+unique_pages = df[df["IsStatic"]==False]["PathClean"].nunique(dropna=True) if "IsStatic" in df.columns else unique_urls
 unique_ips = df["ClientIP"].nunique()
+avg_bytes = int(df["Bytes"].replace("-",0).astype(int).mean()) if not df.empty and (df["Bytes"] != "-").any() else 0
 pct_success = round(((df['Status'].astype(str).str.startswith('2') | df['Status'].astype(str).str.startswith('3')).sum() / (total_hits or 1)) * 100, 1)
 
-st.subheader("Executive summary")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total hits", f"{total_hits:,}")
-c2.metric("Unique pages (PathClean)", f"{unique_paths:,}")
-c3.metric("Unique IPs", f"{unique_ips:,}")
-c4.metric("% 2xx/3xx", f"{pct_success}%")
+st.subheader("Overview")
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Total requests", f"{total_hits:,}")
+c2.metric("Unique URLs", f"{unique_urls:,}")
+c3.metric("Unique pages (non-static)", f"{unique_pages:,}")
+c4.metric("Unique IPs", f"{unique_ips:,}")
+c5.metric("Avg bytes", f"{avg_bytes:,}")
 
 # -------------------------
-# Bot / UA group summary
+# Response codes (table + chart)
 # -------------------------
-st.subheader("UA groups (dynamic + canonical)")
-group_tab = df["UA-Group"].value_counts(dropna=False).reset_index()
-group_tab.columns = ["Group","Hits"]
-st.dataframe(group_tab, use_container_width=True, height=220)
+st.subheader("Response Codes")
+if not df.empty:
+    resp = df['Status'].replace("-", pd.NA).fillna("unknown").value_counts().reset_index()
+    resp.columns = ['Status','Count']
+    st.dataframe(resp, use_container_width=True)
+    fig = px.bar(resp, x='Status', y='Count', title="Response Codes")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("No parsed rows for response codes.")
 
-# common canonical UAs (collapsed)
-st.subheader("Top canonical User-Agents")
-ua_tab = df["User-Agent"].fillna("-").value_counts().reset_index().head(30)
-ua_tab.columns = ["Canonical UA","Hits"]
-st.dataframe(ua_tab, use_container_width=True)
+# -------------------------
+# Redirects and error pages (SEO)
+# -------------------------
+st.subheader("Redirect chains & errors (SEO focus)")
+reds = df[df["Status"].astype(str).str.startswith('3')]
+errors_4xx = df[df["Status"].astype(str).str.startswith('4')]
+errors_5xx = df[df["Status"].astype(str).str.startswith('5')]
+
+st.markdown("**Top redirects (3xx)**")
+if not reds.empty:
+    st.dataframe(reds.groupby("PathClean").size().reset_index(name="Count").sort_values("Count", ascending=False).head(top_n), use_container_width=True)
+else:
+    st.write("No 3xx found")
+
+st.markdown("**Top client errors (4xx)**")
+if not errors_4xx.empty:
+    st.dataframe(errors_4xx.groupby("PathClean").size().reset_index(name="Count").sort_values("Count", ascending=False).head(top_n), use_container_width=True)
+else:
+    st.write("No 4xx found")
+
+st.markdown("**Top server errors (5xx)**")
+if not errors_5xx.empty:
+    st.dataframe(errors_5xx.groupby("PathClean").size().reset_index(name="Count").sort_values("Count", ascending=False).head(top_n), use_container_width=True)
+else:
+    st.write("No 5xx found")
 
 # -------------------------
-# Top URLs and status distribution
+# Top URLs & crawl depth
 # -------------------------
-st.subheader("Top URLs (by hits)")
+st.subheader("Top URLs / Crawl depth")
 top_src = df if not exclude_dash else df[df["PathClean"] != "-"]
 top_urls = top_src["PathClean"].value_counts().reset_index().head(top_n)
 top_urls.columns = ["Path","Hits"]
 st.dataframe(top_urls, use_container_width=True)
 
-st.subheader("Status class distribution (by UA group)")
-status_tab = df.groupby(["UA-Group","Status"]).size().reset_index(name="Count")
-if not status_tab.empty:
-    status_pivot = status_tab.pivot(index="UA-Group", columns="Status", values="Count").fillna(0).astype(int)
-    st.dataframe(status_pivot, use_container_width=True)
-else:
-    st.info("No status data available.")
+# Crawl depth
+depth_counts = top_src["PathClean"].fillna("-").apply(lambda p: len([seg for seg in str(p).split('/') if seg])) \
+               .value_counts().reset_index().sort_values("index")
+depth_counts.columns = ["Depth","Count"]
+st.markdown("Crawl depth distribution (number of path segments)")
+st.dataframe(depth_counts, use_container_width=True)
 
 # -------------------------
-# Section distribution (SEO view)
+# Section distribution (useful for SEO)
 # -------------------------
-st.subheader("Section distribution (where bots are crawling)")
-sec = df["Section"].replace("", "-").fillna("-").value_counts().reset_index()
-sec.columns = ["Section","Hits"]
-st.dataframe(sec, use_container_width=True, height=220)
+st.subheader("Section distribution")
+sections = df["Section"].replace("", "-").fillna("-").value_counts().reset_index()
+sections.columns = ["Section","Hits"]
+st.dataframe(sections, use_container_width=True, height=220)
 
 # -------------------------
-# Pages with errors -> Actionable
+# Hourly heatmap (crawl activity)
 # -------------------------
-st.subheader("Actionables for SEO")
-# pages with lots of errors (4xx/5xx)
-err = df[df["Status"].astype(str).str.startswith(('4','5'))]
-err_by_page = err.groupby("PathClean").agg(Errors=("Status","count"), ExampleStatus=("Status",lambda s: s.mode().iat[0] if not s.mode().empty else "-"), LastSeen=("Time","max")).reset_index().sort_values("Errors", ascending=False).head(50)
-if not err_by_page.empty:
-    st.markdown("**Pages with most 4xx/5xx errors (high priority)**")
-    st.dataframe(err_by_page, use_container_width=True)
-else:
-    st.markdown("No 4xx/5xx errors found in parsed rows.")
-
-# pages heavily crawled by bots (potentially crawl budget waste)
-hits_by_page = df.groupby("PathClean").agg(Hits=("PathClean","size"), UniqueIPs=("ClientIP","nunique"), LastSeen=("Time","max")).reset_index().sort_values("Hits", ascending=False).head(50)
-st.markdown("**Heavily crawled pages (top)**")
-st.dataframe(hits_by_page, use_container_width=True)
-
-# pages crawled by AI/LLM group specifically
-ai_rows = df[df["UA-Group"] == "AI/LLM"]
-if not ai_rows.empty:
-    ai_by_page = ai_rows.groupby("PathClean").size().reset_index(name="AI_Hits").sort_values("AI_Hits", ascending=False).head(50)
-    st.markdown("**Pages crawled by AI/LLM (inspect for content quality / metadata)**")
-    st.dataframe(ai_by_page, use_container_width=True)
-else:
-    st.markdown("No AI/LLM-classified hits found.")
-
-# -------------------------
-# Crawl frequency per page (hits/day estimate)
-# -------------------------
-st.subheader("Crawl frequency (per page)")
-if not df["Time"].isna().all():
-    # compute days span and hits/day per page
-    time_min = df["Time"].min()
-    time_max = df["Time"].max()
-    days = max(1.0, (time_max - time_min).total_seconds() / 86400.0) if time_min and time_max else 1.0
-    freq = df.groupby("PathClean").size().reset_index(name="Hits")
-    freq["HitsPerDay"] = (freq["Hits"] / days).round(2)
-    freq_sorted = freq.sort_values("HitsPerDay", ascending=False).head(50)
-    st.dataframe(freq_sorted, use_container_width=True)
-else:
-    st.info("No valid timestamps to compute frequency.")
-
-# -------------------------
-# Hourly distribution chart (valid times only)
-# -------------------------
+st.subheader("Hourly crawl heatmap")
 ts = df[df["Time"].notna()].copy()
 if not ts.empty:
     ts["Hour"] = ts["Time"].dt.floor("H")
-    agg = ts.groupby(["Hour","UA-Group"]).size().reset_index(name="Count")
-    fig = px.area(agg, x="Hour", y="Count", color="UA-Group", title="Hourly Bot Activity")
+    agg = ts.groupby(["Hour"]).size().reset_index(name="Count")
+    fig = px.bar(agg, x="Hour", y="Count", title="Hits per hour")
     st.plotly_chart(fig, use_container_width=True)
+    # optional heatmap by hour vs section
+    heat = ts.copy()
+    heat['HourStr'] = heat['Time'].dt.strftime('%Y-%m-%d %H:00')
+    heat_agg = heat.groupby(['HourStr','Section']).size().reset_index(name='Count').pivot(index='Section', columns='HourStr', values='Count').fillna(0)
+    st.markdown("Hourly by section (heatmap)")
+    st.dataframe(heat_agg, use_container_width=True, height=300)
 else:
-    st.info("No valid timestamps to render hourly chart.")
+    st.info("No timestamps to produce hourly charts.")
 
 # -------------------------
-# Top IPs & UA variants for forensic analysis
+# User-agents and IPs
 # -------------------------
-st.subheader("Top Client IPs (possible crawler pools)")
+st.subheader("Top User-Agents (canonical) and top raw UA strings")
+ua_canonical = df["User-Agent"].fillna("-").value_counts().reset_index().head(50)
+ua_canonical.columns = ["User-Agent (canonical)","Count"]
+st.dataframe(ua_canonical, use_container_width=True)
+
+ua_raw = df["User-Agent-Raw"].fillna("-").value_counts().reset_index().head(50)
+ua_raw.columns = ["User-Agent (raw)","Count"]
+st.dataframe(ua_raw, use_container_width=True)
+
+st.subheader("Top Client IPs")
 top_ips = df["ClientIP"].value_counts().reset_index().head(200)
 top_ips.columns = ["IP","Hits"]
 st.dataframe(top_ips, use_container_width=True)
 
-st.subheader("Top raw User-Agent strings (for manual review)")
-top_uas = df["User-Agent-Raw"].fillna("-").value_counts().reset_index().head(50)
-top_uas.columns = ["User-Agent (raw)","Count"]
-st.dataframe(top_uas, use_container_width=True)
+# -------------------------
+# Crawl frequency and hits per page (estimate)
+# -------------------------
+st.subheader("Crawl frequency & hits/day per page")
+if not df["Time"].isna().all():
+    tmin = df["Time"].min()
+    tmax = df["Time"].max()
+    days = max(1.0, (tmax - tmin).total_seconds() / 86400.0) if tmin and tmax else 1.0
+    freq = df.groupby("PathClean").size().reset_index(name="Hits")
+    freq["HitsPerDay"] = (freq["Hits"]/days).round(2)
+    st.dataframe(freq.sort_values("HitsPerDay", ascending=False).head(100), use_container_width=True)
+else:
+    st.info("No timestamps to compute frequency.")
 
 # -------------------------
-# Sample rows for auditing
+# SEO actionables (concise)
+# -------------------------
+st.subheader("SEO Actionables (log-only)")
+actions = []
+if not errors_4xx.empty:
+    actions.append(f"{len(errors_4xx['PathClean'].unique())} pages returned 4xx — check canonicalization & internal links.")
+if not errors_5xx.empty:
+    actions.append(f"{len(errors_5xx['PathClean'].unique())} pages returned 5xx — server issue priority.")
+if not reds.empty:
+    actions.append(f"{reds.shape[0]} redirect hits — check redirect chains and canonical URLs.")
+heavy = top_src["PathClean"].value_counts().head(20)
+actions.append(f"Top heavily crawled pages (top 20) — consider robots/x-robots-tag if not useful.")
+if not df[df["UA-Group"]=="AI/LLM"].empty:
+    actions.append("AI/LLM crawlers seen — review content meta & structured data for quality & copyright concerns.")
+if not actions:
+    actions.append("No immediate actionable issues detected from logs.")
+
+for a in actions:
+    st.markdown(f"- {a}")
+
+# -------------------------
+# Sample rows & export
 # -------------------------
 st.subheader("Sample parsed rows (first 30)")
 if not df.empty:
     st.code("\n\n".join(df["RawEntry"].head(30).tolist()))
 else:
-    st.info("No parsed rows to display.")
+    st.info("No parsed rows.")
 
-# -------------------------
-# Exports
-# -------------------------
 st.subheader("Export")
-csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("Download parsed CSV", csv, file_name="parsed_log.csv", mime="text/csv")
+csv = df.to_csv(index=False).encode('utf-8')
+st.download_button("Download parsed CSV", csv, "parsed_log.csv", "text/csv")
 
-# small auto-generated findings summary (editable)
-st.subheader("Auto-generated findings (editable)")
-findings = (
-    f"Total hits: {total_hits}\n"
-    f"Unique pages: {unique_paths}\n"
-    f"Unique IPs: {unique_ips}\n"
-    f"% success (2xx/3xx): {pct_success}%\n\n"
-    "Priority actionables (from above):\n"
-    "- Fix top pages returning 4xx/5xx (see table)\n"
-    "- Identify heavily crawled pages that waste crawl budget\n"
-    "- Review pages crawled by AI/LLM for content & metadata quality\n"
-    "- If you want, upload sitemap or GSC CSV to compute coverage and impressions (optional)\n"
-)
-st.text_area("Findings", value=findings, height=200)
-
-# End of app
+# End app
