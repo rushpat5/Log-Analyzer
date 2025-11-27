@@ -113,6 +113,7 @@ def identify_bot(ua: str):
     return "Human / Other"
 
 def extract_time_from_entry(entry: str):
+    # Standard NCSA time format: [19/Sep/2025:00:00:39 +0530]
     m = re.search(r'\[([^\]]+)\]', entry)
     if not m: return None
     ts = m.group(1).strip()
@@ -121,20 +122,17 @@ def extract_time_from_entry(entry: str):
         except: continue
     return None
 
-# Regex for Combined Log Format
-start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
-
 # -----------------------------------------------------------------------------
 # 3. SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ Parser Config")
     st.markdown("""
-    **Format:** NCSA Combined Log Format
+    **Format:** Auto-Detect (Supports Standard & Grep Prefixes)
     <div class="tech-note">
     <b>Heuristics:</b>
     <br>• <b>User-Agent Sniffing:</b> Classifies traffic into AI Agents (e.g., GPTBot) vs Standard Crawlers (e.g., Googlebot).
-    <br>• <b>Sessionization:</b> Generates hash-based Session IDs using <code>IP + UA + TimeBucket</code>.
+    <br>• <b>Regex Cleaning:</b> Automatically strips filename prefixes (e.g., <code>access.log:123:</code>) to find valid log data.
     </div>
     """, unsafe_allow_html=True)
     
@@ -155,14 +153,12 @@ with st.expander("Technical Methodology (How it works)", expanded=False):
     st.markdown("""
     **Log File Analysis**
     
-    1.  **Ingestion:** Reads raw server logs (Apache/Nginx standard access logs).
+    1.  **Ingestion:** Reads raw server logs. Supports standard NCSA format even if prefixed with filenames/line numbers.
     2.  **Extraction:** Uses Regular Expressions (Regex) to parse `IP`, `Timestamp`, `Request`, `Status`, `Referer`, and `User-Agent`.
     3.  **Classification:**
         *   **Standard Crawlers:** Search engine bots indexing your content.
         *   **LLM Agents:** AI models (ChatGPT, Claude, Perplexity) scraping for training data or RAG.
         *   **Human/Other:** Regular browser traffic.
-    
-    **The Goal:** To audit traffic composition and identify how AI Search Engines are interacting with your infrastructure.
     """)
 
 st.write("")
@@ -188,15 +184,28 @@ if uploaded_file is not None:
         
         hits = []
         
+        # Regex to find the start of a Standard Log Entry (IP - - [Date)
+        # This ignores any garbage prefix like "file.log:123:"
+        log_pattern = re.compile(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+-\s+-\s+\[')
+
         for entry in raw_lines:
             entry = entry.strip()
-            if not entry or not entry[0].isdigit(): continue # Basic filter for non-log lines
+            if not entry: continue
 
-            m_start = start_info_re.match(entry)
-            client_ip = m_start.group("ip") if m_start else "-"
+            # Robust Match: Search for the IP pattern anywhere in the line
+            match = log_pattern.search(entry)
+            
+            if match:
+                # We found a valid log entry inside the line.
+                # Slice the string to start from the IP, effectively removing prefixes
+                clean_entry = entry[match.start():]
+                client_ip = match.group("ip")
+            else:
+                # Skip lines that don't look like NCSA logs
+                continue
 
             # Extract quoted fields (Request, Referer, UA)
-            quoted = re.findall(r'"([^"]*)"', entry)
+            quoted = re.findall(r'"([^"]*)"', clean_entry)
             if len(quoted) >= 3:
                 request, referer, ua = quoted[0], quoted[1], quoted[2]
             else:
@@ -208,11 +217,11 @@ if uploaded_file is not None:
             path = m_req.group(2) if m_req else "-"
 
             # Parse Status
-            m_status = re.search(r'"\s*(\d{3})\s', entry)
+            m_status = re.search(r'"\s*(\d{3})\s', clean_entry)
             status = m_status.group(1) if m_status else "000"
 
             # Parse Time
-            dt = extract_time_from_entry(entry)
+            dt = extract_time_from_entry(clean_entry)
             
             # Bot Classification
             bot_type = identify_bot(ua)
