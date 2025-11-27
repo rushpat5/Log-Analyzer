@@ -5,7 +5,7 @@ from datetime import datetime
 import plotly.express as px
 
 # -----------------------------------------------------------------------------
-# 1. VISUAL CONFIGURATION (Dejan Style - Light Mode Forced)
+# 1. VISUAL CONFIGURATION (Dejan Style)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Server Log Forensics", layout="wide", page_icon="🔎")
 
@@ -49,10 +49,15 @@ BOTS_TRADITIONAL = [
 def identify_bot(ua: str):
     if not ua or ua == "-": return "Human / Other"
     ua_l = ua.lower()
+    
+    # Priority 1: AI Agents
     for p in BOTS_AI:
         if re.search(p, ua_l): return "LLM / AI Agent"
+        
+    # Priority 2: Traditional Bots
     for p in BOTS_TRADITIONAL:
-        if re.search(p, ua_l): return "Standard Crawler"
+        if re.search(p, ua_l): return "Traditional Bot" # Fixed Naming Mismatch
+        
     return "Human / Other"
 
 def extract_time(ts_string: str):
@@ -70,14 +75,16 @@ with st.sidebar:
     st.markdown("""
     **Parser:** Multi-Encoding Reassembler
     <div class="tech-note">
-    <b>Smart Decoding:</b> Automatically detects UTF-16 (Windows logs) vs UTF-8 to prevent data corruption.
-    <br><b>Fault Tolerance:</b> Strips grep metadata prefixes and merges broken lines.
+    <b>Smart Decoding:</b> Auto-detects UTF-16/UTF-8.
+    <br><b>Fault Tolerance:</b> Re-assembles multi-line log entries.
     </div>
     """, unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("### 🛡️ Signatures")
     with st.expander("AI Agents"):
         st.code("\n".join(BOTS_AI), language="text")
+    with st.expander("Traditional Bots"):
+        st.code("\n".join(BOTS_TRADITIONAL), language="text")
 
 # -----------------------------------------------------------------------------
 # 4. MAIN INTERFACE
@@ -93,92 +100,62 @@ st.markdown("#### 1. Upload Access Log")
 uploaded_file = st.file_uploader("Upload .log or .txt file", type=None)
 
 if uploaded_file is not None:
-    # -------------------------------------------------------------------------
-    # 5. SMART DECODING & PARSING
-    # -------------------------------------------------------------------------
-    with st.spinner("Detecting encoding and parsing lines..."):
-        
+    with st.spinner("Processing logs..."):
         # 1. READ & DETECT ENCODING
         raw_bytes = uploaded_file.read()
         text = ""
-        
-        # Try UTF-16 first (Fixes the "G E T" null byte issue)
         try:
             text = raw_bytes.decode("utf-16")
-            # Validation: If it decodes but looks like chinese characters or nonsense, it's not utf-16
-            if "HTTP" not in text and "GET" not in text and "POST" not in text:
-                raise ValueError("Probably not UTF-16")
+            if "HTTP" not in text: raise ValueError()
         except:
-            # Fallback to UTF-8 / Latin-1
-            try:
-                text = raw_bytes.decode("utf-8")
-            except:
-                text = raw_bytes.decode("latin-1", errors="ignore")
+            try: text = raw_bytes.decode("utf-8")
+            except: text = raw_bytes.decode("latin-1", errors="ignore")
         
         raw_lines = text.splitlines()
         clean_entries = []
         
-        # 2. LOGIC: FIND ANCHORS (IP + Timestamp)
-        # IP Pattern to strip prefixes
+        # 2. ANCHOR LOGIC
         ip_finder = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
-        # Date Pattern to identify START of entry [19/Sep/2025...
         date_finder = re.compile(r'\[\d{2}/[A-Z][a-z]{2}/\d{4}')
 
         current_buffer = ""
-        
         for line in raw_lines:
             line = line.strip()
-            # If line is garbage (null bytes usually show up as empty lines after strip), skip
             if not line: continue
             
-            # Is this a new entry?
             if date_finder.search(line):
-                if current_buffer:
-                    clean_entries.append(current_buffer)
+                if current_buffer: clean_entries.append(current_buffer)
                 
-                # Cleanup Prefix: Find IP position
+                # Cleanup Prefix
                 ip_match = ip_finder.search(line)
-                if ip_match:
-                    # Keep everything from the IP onwards
-                    current_buffer = line[ip_match.start():]
-                else:
-                    current_buffer = line
+                if ip_match: current_buffer = line[ip_match.start():]
+                else: current_buffer = line
             else:
-                # Continuation line
                 current_buffer += " " + line
         
-        if current_buffer:
-            clean_entries.append(current_buffer)
+        if current_buffer: clean_entries.append(current_buffer)
 
-    # -------------------------------------------------------------------------
-    # 6. EXTRACTION LOOP
-    # -------------------------------------------------------------------------
+    # 3. CLASSIFY
     with st.spinner(f"Classifying {len(clean_entries)} events..."):
         hits = []
         for entry in clean_entries:
             try:
-                # Extract IP
                 ip_m = ip_finder.search(entry)
                 ip = ip_m.group(1) if ip_m else "-"
                 
-                # Extract Time
                 time_m = re.search(r'\[([^\]]+)\]', entry)
                 dt_str = time_m.group(1) if time_m else ""
                 dt = extract_time(dt_str)
                 
-                # Extract Quotes
                 quotes = re.findall(r'"([^"]*)"', entry)
                 request = quotes[0] if len(quotes) > 0 else "-"
                 referer = quotes[1] if len(quotes) > 1 else "-"
                 ua = quotes[-1] if len(quotes) > 2 else "-"
                 
-                # Extract Method/Path
                 req_parts = request.split()
                 method = req_parts[0] if len(req_parts) > 0 else "-"
                 path = req_parts[1] if len(req_parts) > 1 else "-"
                 
-                # Extract Status
-                # Look for status code outside of quotes
                 clean_for_status = re.sub(r'"[^"]*"', '', entry) 
                 status_m = re.search(r'\s(\d{3})\s', clean_for_status)
                 status = status_m.group(1) if status_m else "000"
@@ -186,24 +163,15 @@ if uploaded_file is not None:
                 bot_type = identify_bot(ua)
                 
                 hits.append({
-                    "IP": ip,
-                    "Time": dt,
-                    "Method": method,
-                    "Path": path,
-                    "Status": status,
-                    "Referer": referer,
-                    "User Agent": ua,
+                    "IP": ip, "Time": dt, "Method": method, "Path": path,
+                    "Status": status, "Referer": referer, "User Agent": ua,
                     "Category": bot_type
                 })
-            except:
-                continue
+            except: continue
 
         df = pd.DataFrame(hits)
 
     if not df.empty:
-        # ---------------------------------------------------------------------
-        # 7. DASHBOARD
-        # ---------------------------------------------------------------------
         st.markdown("---")
         st.markdown("### Traffic Intelligence")
         
@@ -215,12 +183,12 @@ if uploaded_file is not None:
         
         st.write("")
         
-        # Charts
         col_pie, col_bar = st.columns(2)
         with col_pie:
             st.markdown("#### Agent Distribution")
             counts = df['Category'].value_counts().reset_index()
             counts.columns = ['Category', 'Hits']
+            # Fixed Colors matching Categories
             fig = px.pie(counts, names='Category', values='Hits', hole=0.4,
                          color='Category',
                          color_discrete_map={
@@ -231,38 +199,31 @@ if uploaded_file is not None:
             st.plotly_chart(fig, use_container_width=True)
             
         with col_bar:
-            st.markdown("#### Server Response Codes")
+            st.markdown("#### Response Codes")
             s_counts = df['Status'].value_counts().head(5).reset_index()
             s_counts.columns = ['Code', 'Count']
             fig2 = px.bar(s_counts, x='Code', y='Count', color_discrete_sequence=['#24292e'])
             fig2.update_layout(plot_bgcolor='white', yaxis=dict(gridcolor='#f0f0f0'))
             st.plotly_chart(fig2, use_container_width=True)
 
-        # AI Deep Dive
-        st.markdown("#### Top AI Agents")
-        ai_df = df[df['Category'] == "LLM / AI Agent"]
-        if not ai_df.empty:
-            top_ai = ai_df['User Agent'].value_counts().head(10).reset_index()
-            top_ai.columns = ['User Agent', 'Hits']
-            st.dataframe(top_ai, use_container_width=True)
+        st.markdown("#### Top Bots Detected")
+        bot_df = df[df['Category'] != "Human / Other"]
+        if not bot_df.empty:
+            top_bots = bot_df.groupby(['Category', 'User Agent']).size().reset_index(name='Hits').sort_values('Hits', ascending=False).head(10)
+            st.dataframe(top_bots, use_container_width=True)
         else:
-            st.info("No AI Agents detected.")
+            st.info("No Bots found.")
 
-        st.markdown("#### Raw Data Inspector")
-        filter_val = st.selectbox("Filter By:", ["All", "LLM / AI Agents", "Standard Crawlers", "Errors (4xx/5xx)"])
+        st.markdown("#### Data Inspector")
+        filter_val = st.selectbox("Filter By:", ["All", "LLM / AI Agents", "Standard Bots", "Errors"])
         
         view_df = df.copy()
         if filter_val == "LLM / AI Agents": view_df = df[df['Category'] == "LLM / AI Agent"]
-        elif filter_val == "Standard Crawlers": view_df = df[df['Category'] == "Traditional Bot"]
-        elif filter_val == "Errors (4xx/5xx)": view_df = df[df['Status'].astype(str).str.startswith(('4','5'))]
+        elif filter_val == "Standard Bots": view_df = df[df['Category'] == "Traditional Bot"]
+        elif filter_val == "Errors": view_df = df[df['Status'].astype(str).str.startswith(('4','5'))]
         
-        st.dataframe(
-            view_df.sort_values(by="Time", ascending=False),
-            use_container_width=True,
-            column_config={"Time": st.column_config.DatetimeColumn("Timestamp", format="D MMM, HH:mm:ss")}
-        )
-        
-        st.download_button("Download Data (CSV)", df.to_csv(index=False).encode('utf-8'), "log_analysis.csv", "text/csv")
+        st.dataframe(view_df.sort_values(by="Time", ascending=False), use_container_width=True)
+        st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "log_analysis.csv", "text/csv")
 
     else:
-        st.error("Parsing Failure. Please ensure the file is a standard Access Log (UTF-8 or UTF-16).")
+        st.error("No valid entries found.")
