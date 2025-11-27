@@ -2,119 +2,77 @@ import streamlit as st
 import pandas as pd
 import re
 from datetime import datetime
-from urllib.parse import urlparse
 import plotly.express as px
 
 # -----------------------------------------------------------------------------
-# 1. VISUAL CONFIGURATION (Dejan Style - Light Mode Forced)
+# 1. VISUAL CONFIGURATION (Dejan Style)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Server Log Forensics", layout="wide", page_icon="🔎")
 
 st.markdown("""
 <style>
-    /* --- FORCE LIGHT MODE --- */
-    :root {
-        --primary-color: #1a7f37;
-        --background-color: #ffffff;
-        --secondary-background-color: #f6f8fa;
-        --text-color: #24292e;
-        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    }
-
-    .stApp {
-        background-color: #ffffff;
-        color: #24292e;
-    }
-    
-    /* --- TYPOGRAPHY --- */
-    h1, h2, h3, h4, .markdown-text-container {
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        color: #000000 !important;
-        letter-spacing: -0.3px;
-    }
-    
-    p, li, span, div {
-        color: #24292e;
-    }
-
-    /* --- SIDEBAR --- */
-    section[data-testid="stSidebar"] {
-        background-color: #f6f8fa;
-        border-right: 1px solid #d0d7de;
-    }
-    section[data-testid="stSidebar"] * {
-        color: #24292e !important;
-    }
-    
-    /* --- FILE UPLOADER --- */
-    [data-testid="stFileUploader"] {
-        background-color: #f6f8fa;
-        border: 1px dashed #d0d7de;
-        border-radius: 6px;
-        padding: 20px;
-    }
-    
-    /* --- METRIC CARDS --- */
-    div[data-testid="stMetricValue"] {
-        font-size: 1.8rem !important;
-        color: #1a7f37 !important; /* Green Accent */
-        font-weight: 700;
-    }
-    div[data-testid="stMetricLabel"] {
-        font-size: 0.9rem !important;
-        color: #586069 !important;
-    }
-    
-    /* --- TECH NOTE CALLOUTS --- */
-    .tech-note {
-        font-size: 0.85rem;
-        color: #57606a;
-        background-color: #f3f4f6;
-        border-left: 3px solid #0969da;
-        padding: 12px;
-        margin-top: 8px;
-        margin-bottom: 15px;
-        border-radius: 0 4px 4px 0;
-        line-height: 1.5;
-    }
-    
-    /* Remove Streamlit Bloat */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
+    :root { --primary-color: #1a7f37; --background-color: #ffffff; --secondary-background-color: #f6f8fa; --text-color: #24292e; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .stApp { background-color: #ffffff; color: #24292e; }
+    h1, h2, h3, h4, .markdown-text-container { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #000000 !important; letter-spacing: -0.3px; }
+    p, li, span, div { color: #24292e; }
+    section[data-testid="stSidebar"] { background-color: #f6f8fa; border-right: 1px solid #d0d7de; }
+    section[data-testid="stSidebar"] * { color: #24292e !important; }
+    [data-testid="stFileUploader"] { background-color: #f6f8fa; border: 1px dashed #d0d7de; border-radius: 6px; padding: 20px; }
+    div[data-testid="stMetricValue"] { font-size: 1.8rem !important; color: #1a7f37 !important; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { font-size: 0.9rem !important; color: #586069 !important; }
+    .tech-note { font-size: 0.85rem; color: #57606a; background-color: #f3f4f6; border-left: 3px solid #0969da; padding: 12px; margin-top: 8px; margin-bottom: 15px; border-radius: 0 4px 4px 0; line-height: 1.5; }
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. PARSING LOGIC
+# 2. BOT DATABASE & LOGIC
 # -----------------------------------------------------------------------------
 
-# Bot patterns
-GENERIC_BOTS = [
-    r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
-    r'duckduckbot', r'crawler', r'spider', r'applebot'
+# CATEGORY 1: LLM / AI (Data Scrapers, Chatbots)
+BOTS_AI = [
+    r'gptbot', r'chatgpt-user', r'oai-searchbot', r'openai',  # OpenAI
+    r'claudebot', r'claude-web', r'anthropic',               # Anthropic
+    r'perplexitybot', r'perplexity',                         # Perplexity
+    r'applebot-extended',                                    # Apple AI
+    r'google-extended', r'googleother', r'vertexai',         # Google AI
+    r'ccbot', r'commoncrawl',                                # Common Crawl (Training Data)
+    r'cohere-ai', r'cohere',                                 # Cohere
+    r'diffbot', r'bytespider', r'imagesiftbot',              # Scrapers
+    r'facebookbot', r'meta-externalagent', r'omgilibot',     # Meta / Social AI
+    r'amazonbot',                                            # Amazon (Alexa/Training)
+    r'youbot', r'msnbot-media', r'bingbot-media',            # Other AI Search
+    r'ai2bot', r'mistral', r'dataminr'
 ]
-AI_BOTS = [
-    r'gptbot', r'oai-searchbot', r'chatgpt-user', r'claudebot', r'claude-web',
-    r'anthropic-ai', r'perplexitybot', r'perplexity-user', r'google-extended',
-    r'applebot-extended', r'cohere-ai', r'ai2bot', r'ccbot', r'duckassistbot',
-    r'youbot', r'mistralai-user'
+
+# CATEGORY 2: TRADITIONAL (Search Engines, SEO Tools)
+BOTS_TRADITIONAL = [
+    r'googlebot', r'bingbot', r'yandex', r'baiduspider', r'duckduckbot', r'sogou', r'exabot', r'slurp', # Search Engines
+    r'ahrefsbot', r'semrushbot', r'dotbot', r'mj12bot', r'rogerbot', r'moz', r'serpstat',                # SEO Tools
+    r'petalbot', r'aspiegel',                                                                            # Huawei
+    r'pinterest', r'linkedinbot', r'slackbot', r'twitterbot', r'facebookexternalhit', r'discordbot',     # Social Previews
+    r'telegrambot', r'whatsapp', r'skypeuripreview',
+    r'uptime', r'pingdom', r'gtmetrix'                                                                   # Monitoring
 ]
 
 def identify_bot(ua: str):
     if not ua or ua == "-": return "Human / Other"
     ua_l = ua.lower()
-    for p in AI_BOTS:
+    
+    # Check AI first (Priority)
+    for p in BOTS_AI:
         if re.search(p, ua_l): return "LLM / AI Agent"
-    for p in GENERIC_BOTS:
-        if re.search(p, ua_l): return "Standard Crawler"
+        
+    # Check Standard
+    for p in BOTS_TRADITIONAL:
+        if re.search(p, ua_l): return "Traditional Bot"
+        
     return "Human / Other"
 
 def extract_time_from_entry(ts_string: str):
-    # Standard NCSA time format: 19/Sep/2025:00:00:39 +0530
-    # We strip the timezone for simpler parsing if needed, or handle it
+    # Try parsing common formats
     ts = ts_string.strip()
+    # Format: 19/Sep/2025:00:00:39 +0530
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
         try: return datetime.strptime(ts, fmt)
         except: continue
@@ -124,18 +82,21 @@ def extract_time_from_entry(ts_string: str):
 # 3. SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ Parser Config")
+    st.markdown("### ⚙️ Engine Config")
     st.markdown("""
-    **Mode:** Robust Grep Handling
+    **Parser:** Multi-Line Reassembler
     <div class="tech-note">
-    This parser ignores line prefixes (like filenames or line numbers) and hunts specifically for IP addresses, Timestamps, and Quoted Strings.
+    <b>Smart Merging:</b> Detects when log lines are split (e.g. wrapped by text editors or grep) and re-assembles them before analysis.
+    <br><b>Prefix Stripping:</b> Automatically ignores <code>filename:line:</code> prefixes.
     </div>
     """, unsafe_allow_html=True)
     
     st.markdown("---")
-    st.markdown("### 🛡️ Bot Definitions")
-    with st.expander("View AI Bot Signatures"):
-        st.code("\n".join(AI_BOTS), language="text")
+    st.markdown("### 🛡️ Detection Capabilities")
+    with st.expander("Show AI Agent Signatures"):
+        st.code("\n".join(BOTS_AI), language="text")
+    with st.expander("Show Traditional Bot Signatures"):
+        st.code("\n".join(BOTS_TRADITIONAL), language="text")
 
 # -----------------------------------------------------------------------------
 # 4. MAIN INTERFACE
@@ -144,184 +105,165 @@ with st.sidebar:
 st.title("Server Log Forensics")
 st.markdown("### Traffic pattern analysis & Bot detection")
 
-# Abstract
-with st.expander("Technical Methodology (How it works)", expanded=False):
+with st.expander("Technical Methodology", expanded=False):
     st.markdown("""
-    **Log File Analysis**
-    
-    1.  **Ingestion:** Reads raw server logs. Supports standard NCSA format even if prefixed with filenames/line numbers.
-    2.  **Extraction:** Uses Regular Expressions (Regex) to parse `IP`, `Timestamp`, `Request`, `Status`, `Referer`, and `User-Agent`.
-    3.  **Classification:**
-        *   **Standard Crawlers:** Search engine bots indexing your content.
-        *   **LLM Agents:** AI models (ChatGPT, Claude, Perplexity) scraping for training data or RAG.
-        *   **Human/Other:** Regular browser traffic.
+    1.  **Re-assembly:** Reads the raw file and merges split lines based on IP address patterns.
+    2.  **Extraction:** regex parses `IP`, `Timestamp`, `Request`, `Status`, `Bytes`, `Referer`, `User-Agent`.
+    3.  **Classification:** Segments traffic into **LLM/AI**, **Traditional Bots**, and **Humans**.
     """)
 
 st.write("")
-
-# --- INPUT SECTION ---
 st.markdown("#### 1. Upload Access Log")
-uploaded_file = st.file_uploader("Upload .log or .txt file (Max 200MB recommended)", type=None)
+uploaded_file = st.file_uploader("Upload .log or .txt file (Supports Grep output)", type=None)
 
 if uploaded_file is not None:
     # -------------------------------------------------------------------------
-    # 5. PROCESSING
+    # 5. PRE-PROCESSING (LINE MERGING)
     # -------------------------------------------------------------------------
-    with st.spinner("Parsing log lines & identifying signatures..."):
-        
-        # Safe decoding
+    with st.spinner("Re-assembling log lines..."):
         raw_bytes = uploaded_file.read()
-        try:
-            text = raw_bytes.decode("utf-8")
-        except:
-            text = raw_bytes.decode("latin-1", errors="ignore")
-
-        raw_lines = text.splitlines()
+        try: text = raw_bytes.decode("utf-8")
+        except: text = raw_bytes.decode("latin-1", errors="ignore")
         
+        raw_lines = text.splitlines()
+        clean_lines = []
+        
+        # Regex to detect the START of a log line (Any Prefix + IP Address)
+        # Matches: "access.log:123:127.0.0.1" OR just "127.0.0.1"
+        start_pattern = re.compile(r'.*?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+        
+        current_buffer = ""
+        
+        for line in raw_lines:
+            line = line.strip()
+            if not line: continue
+            
+            # Does this line look like the start of a new entry?
+            # It must contain an IP address sequence
+            if start_pattern.match(line):
+                # If we have a previous buffer, save it
+                if current_buffer:
+                    clean_lines.append(current_buffer)
+                current_buffer = line
+            else:
+                # It's a continuation of the previous line (e.g. wrapped UA)
+                current_buffer += " " + line
+                
+        # Append last buffer
+        if current_buffer:
+            clean_lines.append(current_buffer)
+
+    # -------------------------------------------------------------------------
+    # 6. PARSING
+    # -------------------------------------------------------------------------
+    with st.spinner(f"Parsing {len(clean_lines)} entries..."):
         hits = []
         
-        # Robust Parsing Loop
-        for entry in raw_lines:
-            entry = entry.strip()
-            if not entry: continue
+        # Greedy Regex to extract data regardless of prefix
+        # 1. IP
+        # 2. Timestamp [...]
+        # 3. Request "..."
+        # 4. Status 
+        # 5. Bytes
+        # 6. Referer "..."
+        # 7. UA "..."
+        log_regex = re.compile(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3}).*?\[(?P<time>[^\]]+)\].*?"(?P<req>[^"]*)".*?\s(?P<status>\d{3})\s+(?P<bytes>\d+|-).*?"(?P<ref>[^"]*)".*?"(?P<ua>[^"]*)"')
 
-            # 1. FIND IP (Look for X.X.X.X anywhere in line)
-            ip_match = re.search(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3})', entry)
-            if not ip_match: continue
-            client_ip = ip_match.group("ip")
-
-            # 2. FIND TIMESTAMP ([...])
-            time_match = re.search(r'\[(?P<time>[^\]]+)\]', entry)
-            dt_str = time_match.group("time") if time_match else ""
-            dt = extract_time_from_entry(dt_str)
-
-            # 3. FIND QUOTED STRINGS (Request, Referer, UA)
-            # This handles lines that look like: filename:123:IP - - [Date] "REQ" Status Size "Ref" "UA"
-            quoted = re.findall(r'"([^"]*)"', entry)
-            
-            request = "-"
-            referer = "-"
-            ua = "-"
-            
-            if len(quoted) >= 1: request = quoted[0]
-            if len(quoted) >= 2: referer = quoted[1]
-            if len(quoted) >= 3: ua = quoted[-1] # UA is usually the last quoted string
-
-            # Parse Request Method/Path
-            m_req = re.search(r'([A-Z]+)\s+(\S+)', request)
-            method = m_req.group(1) if m_req else "-"
-            path = m_req.group(2) if m_req else "-"
-
-            # Parse Status Code (Look for 3 digits surrounded by space, likely after the Request)
-            # We look for " 200 " or " 404 " pattern
-            status_match = re.search(r'"\s+(\d{3})\s', entry)
-            status = status_match.group(1) if status_match else "000"
-
-            # Bot Classification
-            bot_type = identify_bot(ua)
-            
-            hits.append({
-                "IP": client_ip,
-                "Time": dt,
-                "Method": method,
-                "Path": path,
-                "Status": status,
-                "Referer": referer if referer != "-" else None,
-                "User Agent": ua,
-                "Category": bot_type
-            })
-
+        for entry in clean_lines:
+            match = log_regex.search(entry)
+            if match:
+                d = match.groupdict()
+                
+                # Parse Request (Method + Path)
+                req_parts = d['req'].split()
+                method = req_parts[0] if len(req_parts) > 0 else "-"
+                path = req_parts[1] if len(req_parts) > 1 else "-"
+                
+                # Bot ID
+                bot_type = identify_bot(d['ua'])
+                
+                hits.append({
+                    "IP": d['ip'],
+                    "Time": extract_time_from_entry(d['time']),
+                    "Method": method,
+                    "Path": path,
+                    "Status": d['status'],
+                    "Referer": d['ref'] if d['ref'] != "-" else None,
+                    "User Agent": d['ua'],
+                    "Category": bot_type
+                })
+        
         df = pd.DataFrame(hits)
 
     if not df.empty:
         # ---------------------------------------------------------------------
-        # 6. RESULTS DASHBOARD
+        # 7. RESULTS
         # ---------------------------------------------------------------------
         st.markdown("---")
         st.markdown("### Traffic Intelligence")
         
-        # --- METRICS ROW ---
+        # Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Hits", f"{len(df):,}")
-        c2.metric("AI Agents", f"{len(df[df['Category']=='LLM / AI Agent']):,}")
-        c3.metric("Search Bots", f"{len(df[df['Category']=='Standard Crawler']):,}")
-        c4.metric("Unique IPs", f"{df['IP'].nunique():,}")
+        c2.metric("LLM / AI Bots", f"{len(df[df['Category']=='LLM / AI Agent']):,}")
+        c3.metric("Traditional Bots", f"{len(df[df['Category']=='Traditional Bot']):,}")
+        c4.metric("Human / Other", f"{len(df[df['Category']=='Human / Other']):,}")
         
         st.write("")
 
-        # --- CHARTS ROW ---
+        # Charts
         col_chart1, col_chart2 = st.columns(2)
         
         with col_chart1:
-            st.markdown("#### Bot Composition")
+            st.markdown("#### Agent Composition")
             counts = df['Category'].value_counts().reset_index()
             counts.columns = ['Category', 'Hits']
-            
-            # Dejan-style clean colors
-            fig_pie = px.pie(
-                counts, 
-                names='Category', 
-                values='Hits', 
-                color_discrete_sequence=['#1a7f37', '#0969da', '#d0d7de'], # Green, Blue, Gray
-                hole=0.4
-            )
-            fig_pie.update_layout(showlegend=True, margin=dict(t=0, b=0, l=0, r=0))
+            # Specific Colors: Red for AI, Blue for Trad, Gray for Human
+            fig_pie = px.pie(counts, names='Category', values='Hits', 
+                             color='Category',
+                             color_discrete_map={
+                                 "LLM / AI Agent": "#d93025", 
+                                 "Traditional Bot": "#1a73e8", 
+                                 "Human / Other": "#eeeeee"
+                             },
+                             hole=0.4)
             st.plotly_chart(fig_pie, use_container_width=True)
             
         with col_chart2:
             st.markdown("#### Status Codes")
             status_counts = df['Status'].value_counts().head(5).reset_index()
             status_counts.columns = ['Status Code', 'Count']
-            
-            fig_bar = px.bar(
-                status_counts, 
-                x='Status Code', 
-                y='Count',
-                color_discrete_sequence=['#24292e'] # Dark gray bars
-            )
-            fig_bar.update_layout(
-                plot_bgcolor='white', 
-                paper_bgcolor='white',
-                xaxis=dict(showgrid=False),
-                yaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-                margin=dict(t=0, b=0, l=0, r=0)
-            )
+            fig_bar = px.bar(status_counts, x='Status Code', y='Count', color_discrete_sequence=['#24292e'])
+            fig_bar.update_layout(plot_bgcolor='white', yaxis=dict(gridcolor='#f0f0f0'))
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # --- DATA TABLES ---
-        st.markdown("#### Top Referers")
-        st.markdown("""<div class="tech-note">External domains driving traffic to the server.</div>""", unsafe_allow_html=True)
-        
-        if df['Referer'].notna().any():
-            top_ref = df['Referer'].value_counts().head(10).reset_index()
-            top_ref.columns = ['Referer URL', 'Hits']
-            st.dataframe(top_ref, use_container_width=True, hide_index=True)
+        # Detail Tables
+        st.markdown("#### Top User Agents (AI Only)")
+        ai_df = df[df['Category'] == "LLM / AI Agent"]
+        if not ai_df.empty:
+            top_ai = ai_df['User Agent'].value_counts().head(10).reset_index()
+            top_ai.columns = ['User Agent String', 'Hits']
+            st.dataframe(top_ai, use_container_width=True)
         else:
-            st.info("No referer data found in logs.")
+            st.info("No AI Agents detected in this log.")
 
-        st.markdown("#### Raw Log Data (Filtered)")
+        st.markdown("#### Raw Log Data")
         
-        # Interactive Filter
-        filter_opt = st.selectbox("Filter View:", ["All Traffic", "LLM / AI Agents Only", "Standard Crawlers Only", "Errors (4xx/5xx)"])
-        
+        # Filter
+        filter_opt = st.selectbox("View:", ["All", "LLM / AI Agents", "Traditional Bots", "Humans"])
         df_view = df.copy()
-        if filter_opt == "LLM / AI Agents Only":
-            df_view = df[df['Category'] == "LLM / AI Agent"]
-        elif filter_opt == "Standard Crawlers Only":
-            df_view = df[df['Category'] == "Standard Crawler"]
-        elif filter_opt == "Errors (4xx/5xx)":
-            df_view = df[df['Status'].str.startswith(('4', '5'))]
-            
+        if filter_opt == "LLM / AI Agents": df_view = df[df['Category'] == "LLM / AI Agent"]
+        elif filter_opt == "Traditional Bots": df_view = df[df['Category'] == "Traditional Bot"]
+        elif filter_opt == "Humans": df_view = df[df['Category'] == "Human / Other"]
+        
         st.dataframe(
-            df_view.sort_values(by="Time", ascending=False), 
+            df_view.sort_values(by="Time", ascending=False),
             use_container_width=True,
-            column_config={
-                "Time": st.column_config.DatetimeColumn("Timestamp", format="D MMM YYYY, HH:mm:ss"),
-            }
+            column_config={"Time": st.column_config.DatetimeColumn("Timestamp", format="D MMM YYYY, HH:mm:ss")}
         )
         
         csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Processed CSV", csv, "log_forensics_report.csv", "text/csv")
+        st.download_button("Download Report CSV", csv, "forensics_report.csv", "text/csv")
 
     else:
-        st.warning("No valid log entries found. Please ensure the log contains IPs, Timestamps, and User Agents.")
+        st.error("Parsing failed. 0 valid entries found. Please ensure the file contains NCSA formatted logs (IP, Date, Request).")
