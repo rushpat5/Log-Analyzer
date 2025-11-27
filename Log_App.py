@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
-import hashlib
+from urllib.parse import urlparse
 import plotly.express as px
 
 # -----------------------------------------------------------------------------
@@ -88,7 +87,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. PARSING LOGIC & CONFIGURATION
+# 2. PARSING LOGIC
 # -----------------------------------------------------------------------------
 
 # Bot patterns
@@ -104,7 +103,7 @@ AI_BOTS = [
 ]
 
 def identify_bot(ua: str):
-    if not ua: return "Unknown"
+    if not ua or ua == "-": return "Human / Other"
     ua_l = ua.lower()
     for p in AI_BOTS:
         if re.search(p, ua_l): return "LLM / AI Agent"
@@ -112,11 +111,10 @@ def identify_bot(ua: str):
         if re.search(p, ua_l): return "Standard Crawler"
     return "Human / Other"
 
-def extract_time_from_entry(entry: str):
-    # Standard NCSA time format: [19/Sep/2025:00:00:39 +0530]
-    m = re.search(r'\[([^\]]+)\]', entry)
-    if not m: return None
-    ts = m.group(1).strip()
+def extract_time_from_entry(ts_string: str):
+    # Standard NCSA time format: 19/Sep/2025:00:00:39 +0530
+    # We strip the timezone for simpler parsing if needed, or handle it
+    ts = ts_string.strip()
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
         try: return datetime.strptime(ts, fmt)
         except: continue
@@ -128,11 +126,9 @@ def extract_time_from_entry(entry: str):
 with st.sidebar:
     st.markdown("### ⚙️ Parser Config")
     st.markdown("""
-    **Format:** Auto-Detect (Supports Standard & Grep Prefixes)
+    **Mode:** Robust Grep Handling
     <div class="tech-note">
-    <b>Heuristics:</b>
-    <br>• <b>User-Agent Sniffing:</b> Classifies traffic into AI Agents (e.g., GPTBot) vs Standard Crawlers (e.g., Googlebot).
-    <br>• <b>Regex Cleaning:</b> Automatically strips filename prefixes (e.g., <code>access.log:123:</code>) to find valid log data.
+    This parser ignores line prefixes (like filenames or line numbers) and hunts specifically for IP addresses, Timestamps, and Quoted Strings.
     </div>
     """, unsafe_allow_html=True)
     
@@ -165,7 +161,7 @@ st.write("")
 
 # --- INPUT SECTION ---
 st.markdown("#### 1. Upload Access Log")
-uploaded_file = st.file_uploader("Upload .log or .txt file (Max 200MB recommended for browser performance)", type=None)
+uploaded_file = st.file_uploader("Upload .log or .txt file (Max 200MB recommended)", type=None)
 
 if uploaded_file is not None:
     # -------------------------------------------------------------------------
@@ -184,45 +180,43 @@ if uploaded_file is not None:
         
         hits = []
         
-        # Regex to find the start of a Standard Log Entry (IP - - [Date)
-        # This ignores any garbage prefix like "file.log:123:"
-        log_pattern = re.compile(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+-\s+-\s+\[')
-
+        # Robust Parsing Loop
         for entry in raw_lines:
             entry = entry.strip()
             if not entry: continue
 
-            # Robust Match: Search for the IP pattern anywhere in the line
-            match = log_pattern.search(entry)
+            # 1. FIND IP (Look for X.X.X.X anywhere in line)
+            ip_match = re.search(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3})', entry)
+            if not ip_match: continue
+            client_ip = ip_match.group("ip")
+
+            # 2. FIND TIMESTAMP ([...])
+            time_match = re.search(r'\[(?P<time>[^\]]+)\]', entry)
+            dt_str = time_match.group("time") if time_match else ""
+            dt = extract_time_from_entry(dt_str)
+
+            # 3. FIND QUOTED STRINGS (Request, Referer, UA)
+            # This handles lines that look like: filename:123:IP - - [Date] "REQ" Status Size "Ref" "UA"
+            quoted = re.findall(r'"([^"]*)"', entry)
             
-            if match:
-                # We found a valid log entry inside the line.
-                # Slice the string to start from the IP, effectively removing prefixes
-                clean_entry = entry[match.start():]
-                client_ip = match.group("ip")
-            else:
-                # Skip lines that don't look like NCSA logs
-                continue
+            request = "-"
+            referer = "-"
+            ua = "-"
+            
+            if len(quoted) >= 1: request = quoted[0]
+            if len(quoted) >= 2: referer = quoted[1]
+            if len(quoted) >= 3: ua = quoted[-1] # UA is usually the last quoted string
 
-            # Extract quoted fields (Request, Referer, UA)
-            quoted = re.findall(r'"([^"]*)"', clean_entry)
-            if len(quoted) >= 3:
-                request, referer, ua = quoted[0], quoted[1], quoted[2]
-            else:
-                continue # Skip malformed lines
-
-            # Parse Request
+            # Parse Request Method/Path
             m_req = re.search(r'([A-Z]+)\s+(\S+)', request)
             method = m_req.group(1) if m_req else "-"
             path = m_req.group(2) if m_req else "-"
 
-            # Parse Status
-            m_status = re.search(r'"\s*(\d{3})\s', clean_entry)
-            status = m_status.group(1) if m_status else "000"
+            # Parse Status Code (Look for 3 digits surrounded by space, likely after the Request)
+            # We look for " 200 " or " 404 " pattern
+            status_match = re.search(r'"\s+(\d{3})\s', entry)
+            status = status_match.group(1) if status_match else "000"
 
-            # Parse Time
-            dt = extract_time_from_entry(clean_entry)
-            
             # Bot Classification
             bot_type = identify_bot(ua)
             
@@ -330,4 +324,4 @@ if uploaded_file is not None:
         st.download_button("Download Processed CSV", csv, "log_forensics_report.csv", "text/csv")
 
     else:
-        st.warning("No valid log entries found. Please check if the file format matches standard Apache/Nginx logs.")
+        st.warning("No valid log entries found. Please ensure the log contains IPs, Timestamps, and User Agents.")
