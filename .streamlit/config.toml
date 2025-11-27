@@ -1,5 +1,7 @@
 [theme]
-base="dark"
-
-[server]
-maxUploadSize = 200
+base="light"
+primaryColor="#1a7f37"
+backgroundColor="#ffffff"
+secondaryBackgroundColor="#f6f8fa"
+textColor="#24292e"
+font="sans serif"
