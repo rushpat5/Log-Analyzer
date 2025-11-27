@@ -6,32 +6,97 @@ from urllib.parse import urlparse, parse_qs
 import hashlib
 import plotly.express as px
 
-st.set_page_config(page_title="Log Analyzer", page_icon="🧠", layout="wide")
+# -----------------------------------------------------------------------------
+# 1. VISUAL CONFIGURATION (Dejan Style - Light Mode Forced)
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Server Log Forensics", layout="wide", page_icon="🔎")
 
-# Styling retained
-st.markdown(
-    """
-    <style>
-      body {background-color: #0f1117; color: #e8e8e8;}
-      .stMetric {background: #1c1f2b; border-radius:12px; padding:10px;}
-      div[data-testid="stDataFrame"] table {border-radius:10px; overflow:hidden;}
-      .block-container {padding-top:2rem;}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<style>
+    /* --- FORCE LIGHT MODE --- */
+    :root {
+        --primary-color: #1a7f37;
+        --background-color: #ffffff;
+        --secondary-background-color: #f6f8fa;
+        --text-color: #24292e;
+        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
 
-st.title("🧠 Log Analyzer – Web Traffic & Bot Insights")
-st.caption("Upload a server access log. Extracts time, client IP, referer, bytes, method, path, status class, UA-derived flags and session heuristics.")
+    .stApp {
+        background-color: #ffffff;
+        color: #24292e;
+    }
+    
+    /* --- TYPOGRAPHY --- */
+    h1, h2, h3, h4, .markdown-text-container {
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        color: #000000 !important;
+        letter-spacing: -0.3px;
+    }
+    
+    p, li, span, div {
+        color: #24292e;
+    }
 
-uploaded_file = st.file_uploader("Upload log file (~3 GB max)", type=None)
+    /* --- SIDEBAR --- */
+    section[data-testid="stSidebar"] {
+        background-color: #f6f8fa;
+        border-right: 1px solid #d0d7de;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #24292e !important;
+    }
+    
+    /* --- FILE UPLOADER --- */
+    [data-testid="stFileUploader"] {
+        background-color: #f6f8fa;
+        border: 1px dashed #d0d7de;
+        border-radius: 6px;
+        padding: 20px;
+    }
+    
+    /* --- METRIC CARDS --- */
+    div[data-testid="stMetricValue"] {
+        font-size: 1.8rem !important;
+        color: #1a7f37 !important; /* Green Accent */
+        font-weight: 700;
+    }
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.9rem !important;
+        color: #586069 !important;
+    }
+    
+    /* --- TECH NOTE CALLOUTS --- */
+    .tech-note {
+        font-size: 0.85rem;
+        color: #57606a;
+        background-color: #f3f4f6;
+        border-left: 3px solid #0969da;
+        padding: 12px;
+        margin-top: 8px;
+        margin-bottom: 15px;
+        border-radius: 0 4px 4px 0;
+        line-height: 1.5;
+    }
+    
+    /* Remove Streamlit Bloat */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 2. PARSING LOGIC & CONFIGURATION
+# -----------------------------------------------------------------------------
 
 # Bot patterns
-generic_bot_patterns = [
+GENERIC_BOTS = [
     r'googlebot', r'bingbot', r'ahrefsbot', r'semrushbot', r'yandexbot',
     r'duckduckbot', r'crawler', r'spider', r'applebot'
 ]
-ai_llm_bot_patterns = [
+AI_BOTS = [
     r'gptbot', r'oai-searchbot', r'chatgpt-user', r'claudebot', r'claude-web',
     r'anthropic-ai', r'perplexitybot', r'perplexity-user', r'google-extended',
     r'applebot-extended', r'cohere-ai', r'ai2bot', r'ccbot', r'duckassistbot',
@@ -39,224 +104,221 @@ ai_llm_bot_patterns = [
 ]
 
 def identify_bot(ua: str):
-    if not ua:
-        return None
+    if not ua: return "Unknown"
     ua_l = ua.lower()
-    for p in ai_llm_bot_patterns:
-        if re.search(p, ua_l):
-            return "LLM/AI"
-    for p in generic_bot_patterns:
-        if re.search(p, ua_l):
-            return "Generic"
-    return None
+    for p in AI_BOTS:
+        if re.search(p, ua_l): return "LLM / AI Agent"
+    for p in GENERIC_BOTS:
+        if re.search(p, ua_l): return "Standard Crawler"
+    return "Human / Other"
 
 def extract_time_from_entry(entry: str):
     m = re.search(r'\[([^\]]+)\]', entry)
-    if not m:
-        return None
+    if not m: return None
     ts = m.group(1).strip()
     for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%d/%b/%Y:%H:%M:%S"):
-        try:
-            return datetime.strptime(ts, fmt)
-        except Exception:
-            continue
+        try: return datetime.strptime(ts, fmt)
+        except: continue
     return None
 
-start_re = re.compile(r'^(?:\S+:\d+:)?\d{1,3}(?:\.\d{1,3}){3}\s')
+# Regex for Combined Log Format
 start_info_re = re.compile(r'^(?:(?P<file>\S+):(?P<lineno>\d+):)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s')
 
+# -----------------------------------------------------------------------------
+# 3. SIDEBAR
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### ⚙️ Parser Config")
+    st.markdown("""
+    **Format:** NCSA Combined Log Format
+    <div class="tech-note">
+    <b>Heuristics:</b>
+    <br>• <b>User-Agent Sniffing:</b> Classifies traffic into AI Agents (e.g., GPTBot) vs Standard Crawlers (e.g., Googlebot).
+    <br>• <b>Sessionization:</b> Generates hash-based Session IDs using <code>IP + UA + TimeBucket</code>.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.markdown("### 🛡️ Bot Definitions")
+    with st.expander("View AI Bot Signatures"):
+        st.code("\n".join(AI_BOTS), language="text")
+
+# -----------------------------------------------------------------------------
+# 4. MAIN INTERFACE
+# -----------------------------------------------------------------------------
+
+st.title("Server Log Forensics")
+st.markdown("### Traffic pattern analysis & Bot detection")
+
+# Abstract
+with st.expander("Technical Methodology (How it works)", expanded=False):
+    st.markdown("""
+    **Log File Analysis**
+    
+    1.  **Ingestion:** Reads raw server logs (Apache/Nginx standard access logs).
+    2.  **Extraction:** Uses Regular Expressions (Regex) to parse `IP`, `Timestamp`, `Request`, `Status`, `Referer`, and `User-Agent`.
+    3.  **Classification:**
+        *   **Standard Crawlers:** Search engine bots indexing your content.
+        *   **LLM Agents:** AI models (ChatGPT, Claude, Perplexity) scraping for training data or RAG.
+        *   **Human/Other:** Regular browser traffic.
+    
+    **The Goal:** To audit traffic composition and identify how AI Search Engines are interacting with your infrastructure.
+    """)
+
+st.write("")
+
+# --- INPUT SECTION ---
+st.markdown("#### 1. Upload Access Log")
+uploaded_file = st.file_uploader("Upload .log or .txt file (Max 200MB recommended for browser performance)", type=None)
+
 if uploaded_file is not None:
-    st.info("Processing file…")
-
-    raw_bytes = uploaded_file.read()
-    text = None
-    for enc in ("utf-8", "utf-16", "latin-1"):
+    # -------------------------------------------------------------------------
+    # 5. PROCESSING
+    # -------------------------------------------------------------------------
+    with st.spinner("Parsing log lines & identifying signatures..."):
+        
+        # Safe decoding
+        raw_bytes = uploaded_file.read()
         try:
-            text = raw_bytes.decode(enc)
-            break
-        except Exception:
-            continue
-    if text is None:
-        text = raw_bytes.decode("utf-8", errors="ignore")
+            text = raw_bytes.decode("utf-8")
+        except:
+            text = raw_bytes.decode("latin-1", errors="ignore")
 
-    raw_lines = text.splitlines()
-    entries = []
-    buf = []
-    for ln in raw_lines:
-        ln = ln.rstrip("\r\n")
-        if start_re.match(ln):
-            if buf:
-                entries.append(" ".join(buf).strip())
-                buf = []
-            buf.append(ln)
-        else:
-            if buf:
-                buf.append(ln)
+        raw_lines = text.splitlines()
+        
+        hits = []
+        
+        for entry in raw_lines:
+            entry = entry.strip()
+            if not entry or not entry[0].isdigit(): continue # Basic filter for non-log lines
+
+            m_start = start_info_re.match(entry)
+            client_ip = m_start.group("ip") if m_start else "-"
+
+            # Extract quoted fields (Request, Referer, UA)
+            quoted = re.findall(r'"([^"]*)"', entry)
+            if len(quoted) >= 3:
+                request, referer, ua = quoted[0], quoted[1], quoted[2]
             else:
-                entries.append(ln)
-    if buf:
-        entries.append(" ".join(buf).strip())
+                continue # Skip malformed lines
 
-    hits = []
-    total_requests = 0
-    generic_bot_requests = llm_bot_requests = others_requests = 0
-    generic_bot_uas = {}
-    llm_bot_uas = {}
-    others_uas = {}
+            # Parse Request
+            m_req = re.search(r'([A-Z]+)\s+(\S+)', request)
+            method = m_req.group(1) if m_req else "-"
+            path = m_req.group(2) if m_req else "-"
 
-    for entry in entries:
-        entry = entry.strip()
-        if not entry:
-            continue
-        total_requests += 1
+            # Parse Status
+            m_status = re.search(r'"\s*(\d{3})\s', entry)
+            status = m_status.group(1) if m_status else "000"
 
-        m_start = start_info_re.match(entry)
-        file_src = m_start.group("file") if m_start and m_start.group("file") else "-"
-        lineno = m_start.group("lineno") if m_start and m_start.group("lineno") else "-"
-        client_ip = m_start.group("ip") if m_start else "-"
+            # Parse Time
+            dt = extract_time_from_entry(entry)
+            
+            # Bot Classification
+            bot_type = identify_bot(ua)
+            
+            hits.append({
+                "IP": client_ip,
+                "Time": dt,
+                "Method": method,
+                "Path": path,
+                "Status": status,
+                "Referer": referer if referer != "-" else None,
+                "User Agent": ua,
+                "Category": bot_type
+            })
 
-        quoted = re.findall(r'"([^"]*)"', entry, flags=re.DOTALL)
-        if len(quoted) >= 3:
-            request = quoted[0].strip()
-            referer = quoted[1].strip()
-            ua = quoted[-1].strip()
-        elif len(quoted) == 2:
-            request = quoted[0].strip()
-            referer = "-"
-            ua = quoted[1].strip()
-        elif len(quoted) == 1:
-            request = quoted[0].strip()
-            referer = "-"
-            ua = "-"
+        df = pd.DataFrame(hits)
+
+    if not df.empty:
+        # ---------------------------------------------------------------------
+        # 6. RESULTS DASHBOARD
+        # ---------------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("### Traffic Intelligence")
+        
+        # --- METRICS ROW ---
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Hits", f"{len(df):,}")
+        c2.metric("AI Agents", f"{len(df[df['Category']=='LLM / AI Agent']):,}")
+        c3.metric("Search Bots", f"{len(df[df['Category']=='Standard Crawler']):,}")
+        c4.metric("Unique IPs", f"{df['IP'].nunique():,}")
+        
+        st.write("")
+
+        # --- CHARTS ROW ---
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.markdown("#### Bot Composition")
+            counts = df['Category'].value_counts().reset_index()
+            counts.columns = ['Category', 'Hits']
+            
+            # Dejan-style clean colors
+            fig_pie = px.pie(
+                counts, 
+                names='Category', 
+                values='Hits', 
+                color_discrete_sequence=['#1a7f37', '#0969da', '#d0d7de'], # Green, Blue, Gray
+                hole=0.4
+            )
+            fig_pie.update_layout(showlegend=True, margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        with col_chart2:
+            st.markdown("#### Status Codes")
+            status_counts = df['Status'].value_counts().head(5).reset_index()
+            status_counts.columns = ['Status Code', 'Count']
+            
+            fig_bar = px.bar(
+                status_counts, 
+                x='Status Code', 
+                y='Count',
+                color_discrete_sequence=['#24292e'] # Dark gray bars
+            )
+            fig_bar.update_layout(
+                plot_bgcolor='white', 
+                paper_bgcolor='white',
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
+                margin=dict(t=0, b=0, l=0, r=0)
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- DATA TABLES ---
+        st.markdown("#### Top Referers")
+        st.markdown("""<div class="tech-note">External domains driving traffic to the server.</div>""", unsafe_allow_html=True)
+        
+        if df['Referer'].notna().any():
+            top_ref = df['Referer'].value_counts().head(10).reset_index()
+            top_ref.columns = ['Referer URL', 'Hits']
+            st.dataframe(top_ref, use_container_width=True, hide_index=True)
         else:
-            request = referer = ua = "-"
+            st.info("No referer data found in logs.")
 
-        ua = re.sub(r'\s+', ' ', ua).strip()
+        st.markdown("#### Raw Log Data (Filtered)")
+        
+        # Interactive Filter
+        filter_opt = st.selectbox("Filter View:", ["All Traffic", "LLM / AI Agents Only", "Standard Crawlers Only", "Errors (4xx/5xx)"])
+        
+        df_view = df.copy()
+        if filter_opt == "LLM / AI Agents Only":
+            df_view = df[df['Category'] == "LLM / AI Agent"]
+        elif filter_opt == "Standard Crawlers Only":
+            df_view = df[df['Category'] == "Standard Crawler"]
+        elif filter_opt == "Errors (4xx/5xx)":
+            df_view = df[df['Status'].str.startswith(('4', '5'))]
+            
+        st.dataframe(
+            df_view.sort_values(by="Time", ascending=False), 
+            use_container_width=True,
+            column_config={
+                "Time": st.column_config.DatetimeColumn("Timestamp", format="D MMM YYYY, HH:mm:ss"),
+            }
+        )
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Processed CSV", csv, "log_forensics_report.csv", "text/csv")
 
-        m_req = re.search(r'([A-Z]+)\s+(\S+)(?:\s+HTTP/(\d\.\d))?', request)
-        method = m_req.group(1) if m_req else "-"
-        path = m_req.group(2) if m_req else "-"
-        http_ver = m_req.group(3) if (m_req and m_req.group(3)) else "-"
-
-        m_status_bytes = re.search(r'"\s*(\d{3})\s+(-|\d+)', entry)
-        if not m_status_bytes:
-            m_status_bytes = re.search(r'\s(\d{3})\s+(-|\d+)', entry)
-        status = m_status_bytes.group(1) if m_status_bytes else "-"
-        bytes_sent = m_status_bytes.group(2) if m_status_bytes else "-"
-
-        # === Fixed time parsing logic ===
-        dt = extract_time_from_entry(entry)
-        if dt:
-            time_iso = dt.isoformat()  # Keep full timezone
-            # Keep local (log) time — do not convert to UTC — keep minutes and seconds
-            if dt.tzinfo is not None:
-                dt_local = dt.replace(tzinfo=None)
-            else:
-                dt_local = dt
-            time_parsed = dt_local
-            hour_bucket = dt_local.replace(microsecond=0)  # keep hh:mm:ss
-            date_bucket = dt_local.date()
-        else:
-            time_iso = "-"
-            time_parsed = None
-            hour_bucket = None
-            date_bucket = None
-        # ================================
-
-        status_class = f"{status[0]}xx" if status and status.isdigit() else "-"
-        parsed_url = urlparse(path) if path and path != "-" else None
-        path_clean = parsed_url.path if parsed_url and parsed_url.path else path
-        query_string = parsed_url.query if parsed_url else ""
-        query_params = dict(parse_qs(parsed_url.query)) if parsed_url and parsed_url.query else {}
-        is_static = bool(re.search(r'\.(css|js|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|ico)($|\?)', path, re.IGNORECASE))
-        is_mobile = bool(re.search(r'\b(Mobile|iPhone|Android)\b', ua, re.I))
-        section = path_clean.split('/')[1] if path_clean and path_clean.startswith('/') and len(path_clean.split('/')) > 1 else "-"
-
-        sid_base = f"{client_ip}|{ua}|{hour_bucket.isoformat() if hour_bucket else time_iso}"
-        session_id = hashlib.sha1(sid_base.encode('utf-8')).hexdigest()[:10]
-
-        bot_type = identify_bot(ua)
-        if bot_type == "Generic":
-            generic_bot_requests += 1
-            generic_bot_uas[ua] = generic_bot_uas.get(ua, 0) + 1
-        elif bot_type == "LLM/AI":
-            llm_bot_requests += 1
-            llm_bot_uas[ua] = llm_bot_uas.get(ua, 0) + 1
-        else:
-            others_requests += 1
-            others_uas[ua] = others_uas.get(ua, 0) + 1
-
-        hits.append({
-            "File": file_src,
-            "LineNo": lineno,
-            "ClientIP": client_ip,
-            "Time": time_iso,
-            "Time_parsed": time_parsed,
-            "Date": str(date_bucket) if date_bucket else "-",
-            "HourBucket": hour_bucket.isoformat() if hour_bucket else "-",
-            "Method": method,
-            "Path": path,
-            "PathClean": path_clean,
-            "Query": query_string,
-            "QueryParams": query_params,
-            "Status": status,
-            "StatusClass": status_class,
-            "Bytes": bytes_sent,
-            "Referer": referer,
-            "User-Agent": ua,
-            "Bot Type": bot_type or "Others",
-            "IsStatic": is_static,
-            "IsMobile": is_mobile,
-            "Section": section,
-            "SessionID": session_id,
-            "HTTP_Version": http_ver
-        })
-
-    df_hits = pd.DataFrame(hits)
-    if "Time_parsed" in df_hits.columns:
-        df_hits["Time_parsed"] = pd.to_datetime(df_hits["Time_parsed"], errors="coerce")
-
-    st.subheader("Key Metrics")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Requests", f"{total_requests:,}")
-    c2.metric("Bot (Generic)", f"{generic_bot_requests:,}")
-    c3.metric("Bot (LLM/AI)", f"{llm_bot_requests:,}")
-    c4.metric("Others", f"{others_requests:,}")
-    c5.metric("Unique IPs", f"{df_hits['ClientIP'].nunique():,}" if not df_hits.empty else "0")
-
-    st.subheader("Traffic Composition")
-    df_comp = pd.DataFrame({
-        "Category": ["Bots (Generic)", "Bots (LLM/AI)", "Others"],
-        "Count": [generic_bot_requests, llm_bot_requests, others_requests]
-    })
-    fig = px.pie(df_comp, names="Category", values="Count", title="Requests by Category")
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Top Referers")
-    top_ref = df_hits["Referer"].replace("-", pd.NA).value_counts().reset_index().head(10)
-    top_ref.columns = ["Referer", "Count"]
-    st.dataframe(top_ref, use_container_width=True)
-
-    st.subheader("Top IPs")
-    top_ips = df_hits["ClientIP"].replace("-", pd.NA).value_counts().reset_index().head(10)
-    top_ips.columns = ["ClientIP", "Count"]
-    st.dataframe(top_ips, use_container_width=True)
-
-    st.subheader("Static vs Dynamic Requests")
-    static_counts = df_hits["IsStatic"].value_counts().rename_axis("IsStatic").reset_index(name="Count")
-    static_counts["Label"] = static_counts["IsStatic"].apply(lambda v: "Static" if v else "Dynamic")
-    fig2 = px.pie(static_counts, names="Label", values="Count", title="Static vs Dynamic")
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("Detailed Hits (filtered view)")
-    if not df_hits.empty:
-        if df_hits["Time_parsed"].notna().any():
-            df_hits = df_hits.sort_values(by=["Time_parsed"], ascending=True)
-        df_display = df_hits.reset_index(drop=True)
-        st.dataframe(df_display, use_container_width=True)
-        csv_bytes = df_display.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Detailed CSV", csv_bytes, "detailed_hits.csv", "text/csv")
     else:
-        st.info("No parsed hits.")
-else:
-    st.warning("Please upload a log file to begin analysis.")
+        st.warning("No valid log entries found. Please check if the file format matches standard Apache/Nginx logs.")
